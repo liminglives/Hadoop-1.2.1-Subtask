@@ -178,10 +178,26 @@ class FSDatasetAsyncDiskService {
       return "deletion of " + blockName + " with file " + blockFile
           + " and meta file " + metaFile + " from volume " + volume;
     }
+    
+    private boolean deleteDir (File blockfile) {
+    	File dir = new File(blockfile.getAbsolutePath()+"_dir");
+    	boolean result = true;
+    	if (dir.exists() && dir.isDirectory()) {
+    	    String[] file = dir.list();
+    	    for(String tmp : file) {
+    	    	result = new File(tmp).delete();
+    	    	if (!result)
+    	    		break;
+    	    }
+    	    result = dir.delete();
+    	}
+    	return result;
+    }
 
     @Override
     public void run() {
-      if ( !blockFile.delete() || ( !metaFile.delete() && metaFile.exists() ) ) {
+      if ( !blockFile.delete() || ( !metaFile.delete() && metaFile.exists() ) ||
+    		  (!deleteDir(blockFile))) {
         DataNode.LOG.warn("Unexpected error trying to delete "
             + blockName + " at file " + blockFile + ". Ignored.");
       } else {

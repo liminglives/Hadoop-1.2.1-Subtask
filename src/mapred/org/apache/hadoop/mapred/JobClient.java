@@ -979,9 +979,12 @@ public class JobClient extends Configured implements MRConstants, Tool  {
 
           // Create the splits for the job
           FileSystem fs = submitJobDir.getFileSystem(jobCopy);
+          if (jobCopy.getBoolean(SUBTASK_OUTPUT_ON, IS_SUBTASK_OUTPUT_ON)/*MRConstants.IS_SUBTASK_OUTPUT_ON*/)
+            LOG.info("Using subtask and subtask output pre-shuffle");
           LOG.info("Creating splits at " + fs.makeQualified(submitJobDir));
           int maps = writeSplits(context, submitJobDir);
           jobCopy.setNumMapTasks(maps);
+          //jobCopy.setNumMapSubTasks(10);
 
           // write "queue admins of the queue to which job is being submitted"
           // to job file.
@@ -1059,6 +1062,22 @@ public class JobClient extends Configured implements MRConstants, Tool  {
     Arrays.sort(array, new SplitComparator());
     JobSplitWriter.createSplitFiles(jobSubmitDir, conf,
         jobSubmitDir.getFileSystem(conf), array);
+    //LOG.info(" before Creating setNumMapSubTasks");
+    if (conf.getBoolean(SUBTASK_OUTPUT_ON, IS_SUBTASK_OUTPUT_ON)/*MRConstants.IS_SUBTASK_OUTPUT_ON*/) {
+    	int numsubtasks = 0;
+    	long sublength = conf.getLong(
+    			"dfs.datanode.subblock.length", MRConstants.DEFAULT_SUBBLOCK_SIZE);//MRConstants.DEFAULT_SUBBLOCK_SIZE;
+    	for (InputSplit tmp : splits) {
+    		long leng = tmp.getLength();
+            //System.out.println("jobclient-writenewsplits: inputsplit.getlength="+leng);
+    		numsubtasks += leng / sublength;
+    		if (leng % sublength != 0)
+    			numsubtasks++;
+    	}
+    	JobConf jconf = (JobConf)job.getConfiguration();
+    	jconf.setNumMapSubTasks(numsubtasks);
+    	LOG.info("Creating setNumMapSubTasks="+numsubtasks);
+    }
     return array.length;
   }
   
@@ -1102,6 +1121,23 @@ public class JobClient extends Configured implements MRConstants, Tool  {
     });
     JobSplitWriter.createSplitFiles(jobSubmitDir, job,
         jobSubmitDir.getFileSystem(job), splits);
+    
+    if (job.getBoolean(SUBTASK_OUTPUT_ON, IS_SUBTASK_OUTPUT_ON)/*MRConstants.IS_SUBTASK_OUTPUT_ON*/) {
+    	int numsubtasks = 0;
+    	long sublength = job.getLong(
+    			"dfs.datanode.subblock.length", MRConstants.DEFAULT_SUBBLOCK_SIZE);//MRConstants.DEFAULT_SUBBLOCK_SIZE;
+    	for (org.apache.hadoop.mapred.InputSplit tmp : splits) {
+    		long leng = tmp.getLength();
+            //System.out.println("jobclient-writenewsplits: inputsplit.getlength="+leng);
+    		numsubtasks += leng / sublength;
+    		if (leng % sublength != 0)
+    			numsubtasks++;
+    	}
+    	//JobConf jconf = (JobConf)job.getConfiguration();
+    	job.setNumMapSubTasks(numsubtasks);
+    	LOG.info("Creating setNumMapSubTasks="+numsubtasks);
+    }
+    
     return splits.length;
   }
   

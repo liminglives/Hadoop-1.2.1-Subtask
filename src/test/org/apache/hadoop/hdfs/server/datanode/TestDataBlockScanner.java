@@ -82,7 +82,8 @@ public class TestDataBlockScanner {
 
     int writeSize = blockSize / 2;
     out.write(DFSTestUtil.generateSequentialBytes(0, writeSize));
-    out.sync();
+    //out.sync();
+    out.close();
     
     FSDataInputStream in = fileSystem.open(file1);
     
@@ -96,7 +97,7 @@ public class TestDataBlockScanner {
     Assert.assertEquals(String.format(
         "%d entries in blockMap and it should be empty", blockMapSize), 0,
         blockMapSize);
-    out.close();
+    //out.close();
   }
   
 private void waitForBlocks(FileSystem fileSys, Path name, int blockCount, long length)

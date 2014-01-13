@@ -200,7 +200,7 @@ class DataXceiver implements Runnable, FSConstants {
 
       out.writeShort(DataTransferProtocol.OP_STATUS_SUCCESS); // send op status
       long read = blockSender.sendBlock(out, baseStream, null); // send data
-
+      //System.out.println("===out of sendBlock");
       if (blockSender.isBlockReadFully()) {
         // See if client verification succeeded. 
         // This is an optional response from client.
@@ -208,6 +208,16 @@ class DataXceiver implements Runnable, FSConstants {
           if (in.readShort() == DataTransferProtocol.OP_STATUS_CHECKSUM_OK  && 
               datanode.blockScanner != null) {
             datanode.blockScanner.verifiedByClient(block);
+        	  //System.out.println("===enter datanode.blockScanner.verifiedByClient");
+        	 // try {
+			//	Thread.sleep(5000);
+			//} catch (InterruptedException e) {
+				// TODO Auto-generated catch block
+			//	e.printStackTrace();
+			//}
+			//System.out.println("====enter blockscanner");
+        	//  datanode.blockScanner.verifyBlockPublically(block);
+        	//  System.out.println("====leave blockscanner");
           }
         } catch (IOException ignored) {}
       }
@@ -246,6 +256,7 @@ class DataXceiver implements Runnable, FSConstants {
     //
     Block block = new Block(in.readLong(), 
         dataXceiverServer.estimateBlockSize, in.readLong());
+    //System.out.println("===liming=== dfs.block.size=" + dataXceiverServer.estimateBlockSize);
     LOG.info("Receiving " + block + " src: " + remoteAddress + " dest: "
         + localAddress);
     int pipelineSize = in.readInt(); // num of datanodes in entire pipeline
@@ -401,8 +412,14 @@ class DataXceiver implements Runnable, FSConstants {
 
       // receive the block and mirror to the next target
       String mirrorAddr = (mirrorSock == null) ? null : mirrorNode;
+      try{
       blockReceiver.receiveBlock(mirrorOut, mirrorIn, replyOut,
                                  mirrorAddr, null, targets.length);
+      }
+      catch(IOException ioe) {
+    	  LOG.error("receiveBlock received exception " + ioe);
+    	  throw ioe;
+      }
 
       // if this write is for a replication request (and not
       // from a client), then confirm block. For client-writes,

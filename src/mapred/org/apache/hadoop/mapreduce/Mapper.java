@@ -96,6 +96,18 @@ public class Mapper<KEYIN, VALUEIN, KEYOUT, VALUEOUT> {
 
   public class Context 
     extends MapContext<KEYIN,VALUEIN,KEYOUT,VALUEOUT> {
+	private int subtaskId = -1;
+	 
+	public Context(Configuration conf, TaskAttemptID taskid,
+            RecordReader<KEYIN,VALUEIN> reader,
+            RecordWriter<KEYOUT,VALUEOUT> writer,
+            OutputCommitter committer,
+            StatusReporter reporter,
+            InputSplit split,
+            int subtaskId) throws IOException, InterruptedException {
+      this(conf, taskid, reader, writer, committer, reporter, split);
+      this.subtaskId = subtaskId;
+    }
     public Context(Configuration conf, TaskAttemptID taskid,
                    RecordReader<KEYIN,VALUEIN> reader,
                    RecordWriter<KEYOUT,VALUEOUT> writer,
@@ -104,6 +116,9 @@ public class Mapper<KEYIN, VALUEIN, KEYOUT, VALUEOUT> {
                    InputSplit split) throws IOException, InterruptedException {
       super(conf, taskid, reader, writer, committer, reporter, split);
     }
+    
+    public int getSubtaskId() {return this.subtaskId;}
+    
   }
   
   /**

@@ -30,7 +30,7 @@ import org.apache.hadoop.io.WritableUtils;
  * job tracker. 
  */
 public class TaskCompletionEvent implements Writable{
-  static public enum Status {FAILED, KILLED, SUCCEEDED, OBSOLETE, TIPFAILED};
+  static public enum Status {FAILED, KILLED, SUCCEEDED, OBSOLETE, TIPFAILED, RUNNING};
     
   private int eventId; 
   private String taskTrackerHttp;
@@ -41,6 +41,7 @@ public class TaskCompletionEvent implements Writable{
   private int idWithinJob;
   public static final TaskCompletionEvent[] EMPTY_ARRAY = 
     new TaskCompletionEvent[0];
+  private long subtasksCompletion = 0;
   /**
    * Default constructor for Writable.
    *
@@ -71,6 +72,22 @@ public class TaskCompletionEvent implements Writable{
     this.eventId = eventId; 
     this.status =status; 
     this.taskTrackerHttp = taskTrackerHttp;
+  }
+  
+  public TaskCompletionEvent(int eventId, 
+          TaskAttemptID taskId,
+          int idWithinJob,
+          boolean isMap,
+          Status status, 
+          String taskTrackerHttp,
+          long subtasksComletion){
+
+    this(eventId, taskId, idWithinJob, isMap, status, taskTrackerHttp);
+    this.subtasksCompletion = subtasksComletion;
+  }
+  
+  public long getSubtasksCompletion() {
+	  return subtasksCompletion;
   }
   /**
    * Returns event Id. 
@@ -220,6 +237,11 @@ public class TaskCompletionEvent implements Writable{
     WritableUtils.writeString(out, taskTrackerHttp);
     WritableUtils.writeVInt(out, taskRunTime);
     WritableUtils.writeVInt(out, eventId);
+    //System.out.println("******enter write subtasksCompletion="+subtasksCompletion);
+    if (MRConstants.IS_SUBTASK_OUTPUT_ON) {
+      WritableUtils.writeVLong(out, subtasksCompletion);
+      //System.out.println("******write taskid="+taskId+"subtasksCompletion="+subtasksCompletion);
+    }
   }
   
   public void readFields(DataInput in) throws IOException {
@@ -230,5 +252,10 @@ public class TaskCompletionEvent implements Writable{
     taskTrackerHttp = WritableUtils.readString(in);
     taskRunTime = WritableUtils.readVInt(in);
     eventId = WritableUtils.readVInt(in);
+    //System.out.println("******enter readfields subtasksCompletion="+subtasksCompletion);
+    if (MRConstants.IS_SUBTASK_OUTPUT_ON) {
+      subtasksCompletion = WritableUtils.readVLong(in);
+      //System.out.println("******readfields taskid="+taskId+"subtasksCompletion="+subtasksCompletion);
+    }
   }
 }

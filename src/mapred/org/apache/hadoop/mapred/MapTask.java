@@ -61,6 +61,7 @@ import org.apache.hadoop.io.serializer.Serializer;
 import org.apache.hadoop.mapred.IFile.Writer;
 import org.apache.hadoop.mapred.Merger.Segment;
 import org.apache.hadoop.mapred.SortedRanges.SkipRangeIterator;
+import org.apache.hadoop.mapreduce.Mapper;
 import org.apache.hadoop.mapreduce.TaskAttemptContext;
 import org.apache.hadoop.mapreduce.split.JobSplit.TaskSplitIndex;
 import org.apache.hadoop.util.IndexedSortable;
@@ -79,6 +80,10 @@ class MapTask extends Task {
 
   private TaskSplitIndex splitMetaInfo = new TaskSplitIndex();
   private final static int APPROX_HEADER_LENGTH = 150;
+  
+  //private  boolean IS_MAP_SUBTASK = true;//MRConstants.IS_SUBTASK_OUTPUT_ON;
+  
+  private int numSubMaps = 0;
 
   private static final Log LOG = LogFactory.getLog(MapTask.class.getName());
 
@@ -95,6 +100,14 @@ class MapTask extends Task {
                  int numSlotsRequired) {
     super(jobFile, taskId, partition, numSlotsRequired);
     this.splitMetaInfo = splitIndex;
+  }
+  
+  public MapTask(String jobFile, TaskAttemptID taskId, 
+          int partition, TaskSplitIndex splitIndex,
+          int numSlotsRequired, int numsubtasks) {
+	  this(jobFile, taskId, partition, splitIndex, numSlotsRequired);
+	  this.numSubMaps = numsubtasks;
+	  System.out.println("maptask-construct: numSubtasks="+numsubtasks);
   }
 
   @Override
@@ -141,6 +154,8 @@ class MapTask extends Task {
       } else {
         new TaskSplitIndex().write(out);
       }
+      if (MRConstants.IS_SUBTASK_OUTPUT_ON)
+      	out.writeInt(numSubMaps);
       //TODO do we really need to set this to null?
       splitMetaInfo = null;
     }
@@ -151,6 +166,8 @@ class MapTask extends Task {
     super.readFields(in);
     if (isMapOrReduce()) {
       splitMetaInfo.readFields(in);
+      if (MRConstants.IS_SUBTASK_OUTPUT_ON)
+          numSubMaps = in.readInt();
     }
   }
 
@@ -173,7 +190,14 @@ class MapTask extends Task {
     private long bytesInPrev = -1;
     private long bytesInCurr = -1;
     private final Statistics fsStats;
+    private int subtaskId = -1;
 
+    TrackedRecordReader(InputSplit split, JobConf job, TaskReporter reporter,
+    		int subtaskId) throws IOException {
+    	this(split, job, reporter);
+    	this.subtaskId = subtaskId;
+    }
+    
     TrackedRecordReader(InputSplit split, JobConf job, TaskReporter reporter)
         throws IOException {
       inputRecordCounter = reporter.getCounter(MAP_INPUT_RECORDS);
@@ -224,7 +248,10 @@ class MapTask extends Task {
       throws IOException {
       boolean ret = false;
       try {
-        reporter.setProgress(getProgress());
+    	if (subtaskId == -1)
+          reporter.setProgress(getProgress());
+    	else
+    	  reporter.setProgress(getProgress(), subtaskId);
         beforePos = getPos();
         bytesInPrev = getInputBytes(fsStats);
         ret = rawIn.next(key, value);
@@ -345,7 +372,14 @@ class MapTask extends Task {
     reporter.startCommunicationThread();
     boolean useNewApi = job.getUseNewMapper();
     initialize(job, getJobID(), reporter, useNewApi);
-
+    
+    isSubtaskOutputOn = job.getBoolean(MRConstants.SUBTASK_OUTPUT_ON, MRConstants.IS_SUBTASK_OUTPUT_ON);
+    boolean isMapSubtask = job.getBoolean(MRConstants.SUBTASK_ON, MRConstants.IS_SUBTASK_OUTPUT_ON);
+    if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/) {
+      System.out.println("maptask-run: job.getNumMapSubTasks()="+job.getNumMapSubTasks()+
+    		", NumSubMaps="+numSubMaps);
+      isMapSubtask = true;
+    }
     // check if it is a cleanupJobTask
     if (jobCleanup) {
       runJobCleanupTask(umbilical, reporter);
@@ -361,9 +395,31 @@ class MapTask extends Task {
     }
 
     if (useNewApi) {
-      runNewMapper(job, splitMetaInfo, umbilical, reporter);
+    	if (!isMapSubtask)
+          runNewMapper(job, splitMetaInfo, umbilical, reporter);
+    	else {
+    		try {
+    	  runSubMapper(job, splitMetaInfo, umbilical, reporter);}
+    		catch (IOException ioe) {
+    			LOG.error("runSubMapper catch ioexception " + ioe);
+    			throw ioe;
+    		}
+    		catch (ClassNotFoundException cnfe) {
+    			LOG.error("runSubMapper catch ClassNotFoundException " + cnfe);
+    			throw cnfe;
+    		}
+    		catch (InterruptedException ite) {
+    			LOG.error("runSubMapper catch InterruptedException " + ite);
+    			throw ite;
+    		}
+    	    
+    	}
     } else {
-      runOldMapper(job, splitMetaInfo, umbilical, reporter);
+      if (!isMapSubtask)
+        runOldMapper(job, splitMetaInfo, umbilical, reporter);
+      else
+    	runOldSubMapper(job, splitMetaInfo, umbilical, reporter);
+      
     }
     done(umbilical, reporter);
   }
@@ -464,6 +520,17 @@ class MapTask extends Task {
     private org.apache.hadoop.mapreduce.InputSplit inputSplit;
     private final JobConf job;
     private final Statistics fsStats;
+    private int subtaskId = -1;
+    
+    NewTrackingRecordReader(org.apache.hadoop.mapreduce.InputSplit split,
+            org.apache.hadoop.mapreduce.InputFormat inputFormat,
+            TaskReporter reporter, JobConf job,
+            org.apache.hadoop.mapreduce.TaskAttemptContext taskContext,
+            int subtaskId)
+            throws IOException, InterruptedException {
+    	this(split, inputFormat, reporter, job, taskContext);
+    	this.subtaskId = subtaskId;
+    }
     
     NewTrackingRecordReader(org.apache.hadoop.mapreduce.InputSplit split,
         org.apache.hadoop.mapreduce.InputFormat inputFormat,
@@ -535,7 +602,10 @@ class MapTask extends Task {
           inputRecordCounter.increment(1);
           fileInputByteCounter.increment(bytesInCurr - bytesInPrev);
         }
-        reporter.setProgress(getProgress());
+        if (subtaskId == -1)
+        	reporter.setProgress(getProgress());
+        else
+            reporter.setProgress(getProgress(),subtaskId);
       } catch (IOException ioe) {
         if (inputSplit instanceof FileSplit) {
           FileSplit fileSplit = (FileSplit) inputSplit;
@@ -664,6 +734,28 @@ class MapTask extends Task {
     private final org.apache.hadoop.mapreduce.Partitioner<K,V> partitioner;
     private final int partitions;
 
+    NewOutputCollector(org.apache.hadoop.mapreduce.JobContext jobContext,
+            JobConf job,
+            TaskUmbilicalProtocol umbilical,
+            TaskReporter reporter,
+            int subtaskId
+            ) throws IOException, ClassNotFoundException {
+     collector = new MapOutputBuffer<K,V>(umbilical, job, reporter,subtaskId);
+     partitions = jobContext.getNumReduceTasks();
+     if (partitions > 0) {
+       partitioner = (org.apache.hadoop.mapreduce.Partitioner<K,V>)
+         ReflectionUtils.newInstance(jobContext.getPartitionerClass(), job);
+     } else {
+       partitioner = new org.apache.hadoop.mapreduce.Partitioner<K,V>() {
+         @Override
+         public int getPartition(K key, V value, int numPartitions) {
+           return -1;
+         }
+       };
+     }
+    	
+    }
+    
     @SuppressWarnings("unchecked")
     NewOutputCollector(org.apache.hadoop.mapreduce.JobContext jobContext,
                        JobConf job,
@@ -701,8 +793,645 @@ class MapTask extends Task {
       }
       collector.close();
     }
+    
+  }
+  /*
+  private class SubMapTaskReporter extends TaskReporter {
+	private int numSubtask;
+	float[] subtasksProgress = new float[numSubtask];
+
+	SubMapTaskReporter(Progress taskProgress, TaskUmbilicalProtocol umbilical,
+			JvmContext jvmContext) {
+		super(taskProgress, umbilical, jvmContext);
+		// TODO Auto-generated constructor stub
+	}
+	
+	public int getNumSubtask() {return this.numSubtask;}
+	
+	public void setNumSubtask(int num) {this.numSubtask = num;}
+	
+	public void setProgress(float progress, int subtaskId) {
+		if (subtaskId<0 || numSubtask<0)
+			setProgress(progress);
+		else {
+			subtasksProgress[subtaskId] += progress;
+			setProgress(calcArgProgress(subtasksProgress));
+		}
+	}
+	
+	private float calcArgProgress(float[] progresses) {
+		float sum = 0;
+		for (int i=0; i<numSubtask; ++i)
+			sum += progresses[i];
+		
+		return sum / numSubtask;
+	}
+	  
+  }*/
+  
+  private class SubMapTaskRunner<K1, V1, K2, V2> 
+                      extends Thread {
+                    //implements Runnable {
+	private org.apache.hadoop.mapreduce.InputSplit split;
+	private org.apache.hadoop.mapreduce.Mapper<K1,V1,K2,V2> mapper;
+	private TaskReporter reporter;
+	private JobConf job;
+	private TaskUmbilicalProtocol umbilical;
+	private org.apache.hadoop.mapreduce.TaskAttemptContext taskContext;
+	private final int subtaskId;
+	
+	public SubMapTaskRunner(final JobConf job,
+			final org.apache.hadoop.mapreduce.InputSplit split,
+			TaskReporter reporter,
+			final TaskUmbilicalProtocol umbilical,
+			int subtaskId
+			     ){
+		this.split = split;
+		this.job = job;
+		this.umbilical = umbilical;
+		this.reporter = reporter;
+		this.subtaskId = subtaskId;
+		
+	}
+	@Override
+	public void run() {
+		// TODO Auto-generated method stub
+		LOG.info("=== start subtask "+subtaskId);
+		org.apache.hadoop.mapreduce.RecordReader<K1, V1> input = null;
+		org.apache.hadoop.mapreduce.RecordWriter output = null;
+	    org.apache.hadoop.mapreduce.Mapper<K1, V1, K2, V2>.Context 
+	           mapperContext = null;
+		try {
+		  taskContext =
+			   new org.apache.hadoop.mapreduce.TaskAttemptContext(job, getTaskID());
+	      mapper = (org.apache.hadoop.mapreduce.Mapper<K1, V1, K2, V2>)
+	      ReflectionUtils.newInstance(taskContext.getMapperClass(), job);
+			
+	      org.apache.hadoop.mapreduce.InputFormat<K1, V1> inputFormat =
+			 (org.apache.hadoop.mapreduce.InputFormat<K1, V1>)
+	      ReflectionUtils.newInstance(taskContext.getInputFormatClass(), job);
+	      input = new NewTrackingRecordReader<K1, V1>
+	                (split, inputFormat, reporter, job, taskContext);
+	      
+	      job.setBoolean("mapred.skip.on", isSkipping());
+	      
+	      Constructor<org.apache.hadoop.mapreduce.Mapper.Context> contextConstructor =
+	          org.apache.hadoop.mapreduce.Mapper.Context.class.getConstructor
+	          (new Class[]{org.apache.hadoop.mapreduce.Mapper.class,
+	                       Configuration.class,
+	                       org.apache.hadoop.mapreduce.TaskAttemptID.class,
+	                       org.apache.hadoop.mapreduce.RecordReader.class,
+	                       org.apache.hadoop.mapreduce.RecordWriter.class,
+	                       org.apache.hadoop.mapreduce.OutputCommitter.class,
+	                       org.apache.hadoop.mapreduce.StatusReporter.class,
+	                       org.apache.hadoop.mapreduce.InputSplit.class});
+
+	        // get an output object
+	        if (job.getNumReduceTasks() == 0) {
+	           output =
+	             new NewDirectOutputCollector(taskContext, job, umbilical, reporter);
+	        } else {
+	          output = 
+	        	 new NewOutputCollector(taskContext, job, umbilical, reporter, subtaskId);
+	        }
+
+	        mapperContext = contextConstructor.newInstance(mapper, job, getTaskID(),
+	                                                       input, output, committer,
+	                                                       reporter, split);
+
+	        input.initialize(split, mapperContext);
+	        mapper.run(mapperContext);
+	        
+	        input.close();
+	        input = null;
+	        output.close(mapperContext);
+	        output = null;
+	        if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/) {
+	          sendSubtaskFinishedStatus(umbilical); //for subtask output shuffle
+	        }
+	        taskStatus.setSucceedSubtask(subtaskId); 
+	        LOG.info("=== finished subtask="+subtaskId);
+		} catch (ClassNotFoundException e) {
+			// TODO Auto-generated catch block
+			LOG.error("=== subtask="+subtaskId+" catch exception "+ e);
+			e.printStackTrace();
+		} catch (IOException e) {
+			// TODO Auto-generated catch block
+			LOG.error("=== subtask="+subtaskId+" catch exception "+ e);
+			e.printStackTrace();
+		} catch (InterruptedException e) {
+			// TODO Auto-generated catch block
+			LOG.error("=== subtask="+subtaskId+" catch exception "+ e);
+			e.printStackTrace();
+		} catch (SecurityException e) {
+			// TODO Auto-generated catch block
+			LOG.error("=== subtask="+subtaskId+" catch exception "+ e);
+			e.printStackTrace();
+		} catch (NoSuchMethodException e) {
+			// TODO Auto-generated catch block
+			LOG.error("=== subtask="+subtaskId+" catch exception "+ e);
+			e.printStackTrace();
+		} catch (IllegalArgumentException e) {
+			// TODO Auto-generated catch block
+			LOG.error("=== subtask="+subtaskId+" catch exception "+ e);
+			e.printStackTrace();
+		} catch (InstantiationException e) {
+			// TODO Auto-generated catch block
+			LOG.error("=== subtask="+subtaskId+" catch exception "+ e);
+			e.printStackTrace();
+		} catch (IllegalAccessException e) {
+			// TODO Auto-generated catch block
+			LOG.error("=== subtask="+subtaskId+" catch exception "+ e);
+			e.printStackTrace();
+		} catch (InvocationTargetException e) {
+			// TODO Auto-generated catch block
+			LOG.error("=== subtask="+subtaskId+" catch exception "+ e);
+			e.printStackTrace();
+		} finally {
+		    closeQuietly(input);
+		    closeQuietly(output, mapperContext);
+		}
+	}
+	  
+  }
+  
+  private class OldSubMapTaskRunner<INKEY,INVALUE,OUTKEY,OUTVALUE> 
+                      extends Thread {
+                    //implements Runnable {
+	private InputSplit split;
+	private TaskReporter reporter;
+	private JobConf job;
+	private TaskUmbilicalProtocol umbilical;
+	private final int subtaskId;
+	
+	public OldSubMapTaskRunner(final JobConf job,
+			final InputSplit split,
+			TaskReporter reporter,
+			final TaskUmbilicalProtocol umbilical,
+			int subtaskId
+			     ){
+		this.split = split;
+		this.job = job;
+		this.umbilical = umbilical;
+		this.reporter = reporter;
+		this.subtaskId = subtaskId;
+		
+	}
+	@Override
+	public void run() {
+		// TODO Auto-generated method stub
+		LOG.info("=== start subtask "+subtaskId);
+		RecordReader<INKEY,INVALUE> in = null;
+		MapOutputCollector collector = null;
+        try {
+	     in = isSkipping() ? 
+	         new SkippingRecordReader<INKEY,INVALUE>(split, umbilical, reporter) :
+	         new TrackedRecordReader<INKEY,INVALUE>(split, job, reporter);
+	     job.setBoolean("mapred.skip.on", isSkipping());
+
+	     int numReduceTasks = conf.getNumReduceTasks();
+	     LOG.info("numReduceTasks: " + numReduceTasks);
+	     
+	     if (numReduceTasks > 0) {
+	       collector = new MapOutputBuffer(umbilical, job, reporter, subtaskId);
+	     } else { 
+	       collector = new DirectMapOutputCollector(umbilical, job, reporter);
+	     }
+	     MapRunnable<INKEY,INVALUE,OUTKEY,OUTVALUE> runner =
+	       ReflectionUtils.newInstance(job.getMapRunnerClass(), job);
+
+	     //try {
+	       runner.run(in, new OldOutputCollector(collector, conf), reporter);
+	       collector.flush();
+	       
+	       in.close();
+	       in = null;
+	       collector.close();
+	       collector = null;
+	    // } finally {
+	    //   closeQuietly(in);
+	    //   closeQuietly(collector);
+	    // }
+		
+	       if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/) {
+		      sendSubtaskFinishedStatus(umbilical); //for subtask output shuffle
+		   }
+		   taskStatus.setSucceedSubtask(subtaskId); 
+		   LOG.info("=== finished subtask="+subtaskId);
+		} catch (ClassNotFoundException e) {
+			// TODO Auto-generated catch block
+			LOG.error("=== subtask="+subtaskId+" catch exception "+ e);
+			e.printStackTrace();
+		} catch (IOException e) {
+			// TODO Auto-generated catch block
+			LOG.error("=== subtask="+subtaskId+" catch exception "+ e);
+			e.printStackTrace();
+		} catch (InterruptedException e) {
+			// TODO Auto-generated catch block
+			LOG.error("=== subtask="+subtaskId+" catch exception "+ e);
+			e.printStackTrace();
+		} catch (SecurityException e) {
+			// TODO Auto-generated catch block
+			LOG.error("=== subtask="+subtaskId+" catch exception "+ e);
+			e.printStackTrace();
+		} catch (IllegalArgumentException e) {
+			// TODO Auto-generated catch block
+			LOG.error("=== subtask="+subtaskId+" catch exception "+ e);
+			e.printStackTrace();
+		} finally {
+			closeQuietly(in);
+		    closeQuietly(collector);
+		}
+	}
+	  
+  }
+  
+  private void runSubMapper(final JobConf job,
+                    final TaskSplitIndex splitIndex,
+                    final TaskUmbilicalProtocol umbilical,
+                    TaskReporter reporter
+                    ) throws IOException, ClassNotFoundException,
+                             InterruptedException {
+    List<SubMapTaskRunner> subtasks = new ArrayList<SubMapTaskRunner>();
+    int subtaskId = 0;
+    int numSubtask = 0;
+    // rebuild the input split
+    org.apache.hadoop.mapreduce.InputSplit split = null;
+    split = getSplitDetails(new Path(splitIndex.getSplitLocation()),
+        splitIndex.getStartOffset());
+    LOG.info("====Liming: subtask is on");
+    System.out.println("=====Liming: subtask is on");
+    
+    List<org.apache.hadoop.mapreduce.InputSplit> subSplits;
+    
+    long subblockLength = conf.getLong(
+			  "dfs.datanode.subblock.length", MRConstants.DEFAULT_SUBBLOCK_SIZE);
+    subSplits = getSubSplitDetails(split, subblockLength/*MRConstants.DEFAULT_SUBBLOCK_SIZE*/);
+    numSubtask = subSplits.size();
+    if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/ && numSubtask != numSubMaps) {
+    	//numSubMaps = job.getNumMapSubTasks();
+    	System.out.println("maptask-runSubMapper: numsubtask " +numSubtask+
+    			" is not equal to numSubMaps " + numSubMaps +
+    			", job.getNumMapSubTasks()="+job.getNumMapSubTasks());
+    }
+    if (numSubtask > MRConstants.MAX_NUM_SUBTASKS || numSubtask < 1) {
+    	String ioe = "taskId="+getTaskID()+": number of subtask "+numSubtask+" out of range";
+    	System.out.println(ioe);
+    	throw new IOException(ioe);
+    }
+    numSubMaps = numSubtask;
+    reporter.setNumSubtask(numSubtask);
+    taskStatus.setNumSubtasks(numSubtask);
+    
+    for (org.apache.hadoop.mapreduce.InputSplit tmp : subSplits) {
+    	SubMapTaskRunner runner = new SubMapTaskRunner(job, 
+    			tmp, reporter, umbilical, subtaskId);
+    	runner.start();
+    	subtasks.add(runner);
+    	subtaskId++;
+    }
+    
+    for (SubMapTaskRunner tmp : subtasks) {
+    	try{
+    	tmp.join();}
+    	catch(InterruptedException ite){
+    		LOG.error("mergeSubFileout catch InterruptedException " + ite);
+    		throw ite;
+    	}
+    }
+    
+    if (!taskStatus.checkIfAllSubtaskFinished()) {
+    	throw new IOException("Not all map subtask fininsh in taskid="+ getTaskID()+
+    			", subtaskstatus="+taskStatus.getStatusSubtasks());
+    } 
+    LOG.info("====Liming taskId="+getTaskID()+": all subtasks finished, subtaskstatus="+
+    		taskStatus.getStatusSubtasks());
+    if (!isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/) {
+      try {
+        mergeSubFileout(job, reporter, subtasks.size());}
+      catch (IOException ioe) {
+		LOG.error("mergeSubFileout catch ioexception " + ioe);
+		throw ioe;
+	  }
+	  catch (ClassNotFoundException cnfe) {
+		LOG.error("mergeSubFileout catch ClassNotFoundException " + cnfe);
+		throw cnfe;
+	  }
+	  catch (InterruptedException ite) {
+		LOG.error("mergeSubFileout catch InterruptedException " + ite);
+		throw ite;
+	  } 
+	}
+    
+  }
+  
+  
+  
+  private void runOldSubMapper(final JobConf job,
+                    final TaskSplitIndex splitIndex,
+                    final TaskUmbilicalProtocol umbilical,
+                    TaskReporter reporter
+                    ) throws IOException, ClassNotFoundException,
+                             InterruptedException {
+    List<OldSubMapTaskRunner> subtasks = new ArrayList<OldSubMapTaskRunner>();
+    int subtaskId = 0;
+    int numSubtask = 0;
+    // rebuild the input split
+    //org.apache.hadoop.mapreduce.InputSplit split = null;
+    InputSplit split = getSplitDetails(new Path(splitIndex.getSplitLocation()),
+            splitIndex.getStartOffset());
+
+     updateJobWithSplit(job, split); //need to confirm
+    reporter.setInputSplit(split);
+
+    LOG.info("====Liming: old subtask is on");
+    System.out.println("=====Liming: old subtask is on");
+    
+    List<InputSplit> subSplits;
+    
+    long subblockLength = conf.getLong(
+			  "dfs.datanode.subblock.length", MRConstants.DEFAULT_SUBBLOCK_SIZE);
+    subSplits = getOldSubSplitDetails(split, subblockLength/*MRConstants.DEFAULT_SUBBLOCK_SIZE*/);
+    numSubtask = subSplits.size();
+    if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/ && numSubtask != numSubMaps) {
+    	//numSubMaps = job.getNumMapSubTasks();
+    	System.out.println("maptask-runSubMapper: numsubtask " +numSubtask+
+    			" is not equal to numSubMaps " + numSubMaps +
+    			", job.getNumMapSubTasks()="+job.getNumMapSubTasks());
+    }
+    if (numSubtask > MRConstants.MAX_NUM_SUBTASKS || numSubtask < 1) {
+    	String ioe = "taskId="+getTaskID()+": number of subtask "+numSubtask+" out of range";
+    	System.out.println(ioe);
+    	throw new IOException(ioe);
+    }
+    numSubMaps = numSubtask;
+    reporter.setNumSubtask(numSubtask);
+    taskStatus.setNumSubtasks(numSubtask);
+    
+    for (InputSplit tmp : subSplits) {
+    	OldSubMapTaskRunner runner = new OldSubMapTaskRunner(job, 
+    			tmp, reporter, umbilical, subtaskId);
+    	runner.start();
+    	subtasks.add(runner);
+    	subtaskId++;
+    }
+    
+    for (OldSubMapTaskRunner tmp : subtasks) {
+    	try{
+    	tmp.join();}
+    	catch(InterruptedException ite){
+    		LOG.error("mergeSubFileout catch InterruptedException " + ite);
+    		throw ite;
+    	}
+    }
+    
+    if (!taskStatus.checkIfAllSubtaskFinished()) {
+    	throw new IOException("Not all map subtask fininsh in taskid="+ getTaskID()+
+    			", subtaskstatus="+taskStatus.getStatusSubtasks());
+    } 
+    LOG.info("====Liming taskId="+getTaskID()+": all subtasks finished, subtaskstatus="+
+    		taskStatus.getStatusSubtasks());
+    if (!isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/) {
+      try {
+        mergeSubFileout(job, reporter, subtasks.size());}
+      catch (IOException ioe) {
+		LOG.error("mergeSubFileout catch ioexception " + ioe);
+		throw ioe;
+	  }
+	  catch (ClassNotFoundException cnfe) {
+		LOG.error("mergeSubFileout catch ClassNotFoundException " + cnfe);
+		throw cnfe;
+	  }
+	  catch (InterruptedException ite) {
+		LOG.error("mergeSubFileout catch InterruptedException " + ite);
+		throw ite;
+	  } 
+	}
+    
+  }  
+  
+  private List<org.apache.hadoop.mapreduce.InputSplit> 
+  getSubSplitDetails(org.apache.hadoop.mapreduce.InputSplit split, long subLength) throws IOException {
+	  List<org.apache.hadoop.mapreduce.InputSplit> result = 
+		  new ArrayList<org.apache.hadoop.mapreduce.InputSplit>();
+	  org.apache.hadoop.mapreduce.lib.input.FileSplit filesplit = 
+		  (org.apache.hadoop.mapreduce.lib.input.FileSplit)split;
+	  org.apache.hadoop.mapreduce.lib.input.FileSplit tmp = null;
+	  
+	  long start = filesplit.getStart();
+	  long length = filesplit.getLength();
+	  long end = start + length;
+	  //long subLength = length / num;
+	  Path file = filesplit.getPath();
+	  String[] locations = filesplit.getLocations();
+	  
+	  while ((start + subLength) < end) {
+		  tmp = new org.apache.hadoop.mapreduce.lib.input.FileSplit(
+				  file,
+				  start,
+				  subLength,
+				  locations);
+		  start += subLength;
+		  result.add((org.apache.hadoop.mapreduce.InputSplit)tmp);
+	  }
+	  /*
+	  for (int i=0; i<num-1; ++i) {
+		  tmp = new org.apache.hadoop.mapreduce.lib.input.FileSplit(
+				  file,
+				  start,
+				  subLength,
+				  locations);
+		  start += subLength;
+		  result.add((org.apache.hadoop.mapreduce.InputSplit)tmp);
+	  }*/
+	  tmp = new org.apache.hadoop.mapreduce.lib.input.FileSplit(
+			  file,
+			  start,
+			  end - start,
+			  locations);
+	  result.add((org.apache.hadoop.mapreduce.InputSplit)tmp);
+	  
+	  return result;
+  }
+  
+  private List<InputSplit> 
+  getOldSubSplitDetails(InputSplit split, long subLength) throws IOException {
+	  List<InputSplit> result =  new ArrayList<InputSplit>();
+	  FileSplit filesplit = (FileSplit)split;
+	  FileSplit tmp = null;
+	  
+	  long start = filesplit.getStart();
+	  long length = filesplit.getLength();
+	  long end = start + length;
+	  //long subLength = length / num;
+	  Path file = filesplit.getPath();
+	  String[] locations = filesplit.getLocations();
+	  
+	  while ((start + subLength) < end) {
+		  tmp = new FileSplit(
+				  file,
+				  start,
+				  subLength,
+				  locations);
+		  start += subLength;
+		  result.add((InputSplit)tmp);
+	  }
+	  /*
+	  for (int i=0; i<num-1; ++i) {
+		  tmp = new org.apache.hadoop.mapreduce.lib.input.FileSplit(
+				  file,
+				  start,
+				  subLength,
+				  locations);
+		  start += subLength;
+		  result.add((org.apache.hadoop.mapreduce.InputSplit)tmp);
+	  }*/
+	  tmp = new FileSplit(
+			  file,
+			  start,
+			  end - start,
+			  locations);
+	  result.add((InputSplit)tmp);
+	  
+	  return result;
+  }  
+  
+  private <K,V> void mergeSubFileout(JobConf job , TaskReporter reporter,
+		                       int numSubtask) 
+    throws IOException, InterruptedException, 
+      ClassNotFoundException {
+    // get the approximate size of the final output/index files
+    long finalOutFileSize = 0;
+    long finalIndexFileSize = 0;
+    final Path[] filename = new Path[numSubtask];
+    final TaskAttemptID mapId = getTaskID();
+    
+    ArrayList<SpillRecord> indexCacheList = new ArrayList<SpillRecord>();
+    FileSystem rfs = ((LocalFileSystem)FileSystem.getLocal(job)).getRaw();
+    int partitions = job.getNumReduceTasks();
+    Class<K> keyClass = (Class<K>)job.getMapOutputKeyClass();
+    Class<V> valClass = (Class<V>)job.getMapOutputValueClass();
+    
+    for(int i = 0; i < numSubtask; i++) {
+      filename[i] = mapOutputFile.getSubtaskOutputFile(i);
+      finalOutFileSize += rfs.getFileStatus(filename[i]).getLen();
+    }  
+    
+    if (numSubtask == 1) { //the spill is the final output
+        rfs.rename(filename[0],
+          new Path(filename[0].getParent(), "file.out"));
+     
+        rfs.rename(mapOutputFile.getSubtaskOutputIndexFile(0),
+          new Path(filename[0].getParent(),"file.out.index"));
+      
+      return;
+    }
+
+  // read in paged indices
+
+  for (int i = 0; i < numSubtask; ++i) {
+    Path indexFileName = mapOutputFile.getSubtaskOutputIndexFile(i);
+    indexCacheList.add(new SpillRecord(indexFileName, job, null));
   }
 
+  //make correction in the length to include the sequence file header
+  //lengths for each partition
+  finalOutFileSize += partitions * APPROX_HEADER_LENGTH;
+  finalIndexFileSize = partitions * MAP_OUTPUT_INDEX_RECORD_LENGTH;
+
+  Path finalOutputFile =
+    mapOutputFile.getOutputFileForWrite(finalOutFileSize);
+  Path finalIndexFile =
+    mapOutputFile.getOutputIndexFileForWrite(finalIndexFileSize); 
+
+
+  //The output stream for the final single output file
+  FSDataOutputStream finalOut = rfs.create(finalOutputFile, true, 4096);
+  CompressionCodec codec = null;
+  if (job.getCompressMapOutput()) {
+      Class<? extends CompressionCodec> codecClass =
+        job.getMapOutputCompressorClass(DefaultCodec.class);
+      codec = ReflectionUtils.newInstance(codecClass, job);
+    }
+
+
+{
+IndexRecord rec = new IndexRecord();
+final SpillRecord spillRec = new SpillRecord(partitions);
+for (int parts = 0; parts < partitions; parts++) {
+//create the segments to be merged
+List<Segment<K,V>> segmentList =
+new ArrayList<Segment<K, V>>(numSubtask);
+for(int i = 0; i < numSubtask; i++) {
+IndexRecord indexRecord = indexCacheList.get(i).getIndex(parts);
+
+Segment<K,V> s =
+new Segment<K,V>(job, rfs, filename[i], indexRecord.startOffset,
+indexRecord.partLength, codec, true);
+segmentList.add(i, s);
+
+if (LOG.isDebugEnabled()) {
+LOG.debug("MapId=" + mapId + " Reducer=" + parts +
+"Spill =" + i + "(" + indexRecord.startOffset + "," +
+indexRecord.rawLength + ", " + indexRecord.partLength + ")");
+}
+}
+
+//merge
+@SuppressWarnings("unchecked")
+Counters.Counter combineInputCounter = 
+        reporter.getCounter(COMBINE_INPUT_RECORDS);
+Counters.Counter combineOutputCounter = 
+	    reporter.getCounter(COMBINE_OUTPUT_RECORDS);
+CombinerRunner<K,V> combinerRunner = CombinerRunner.create(job, getTaskID(), 
+        combineInputCounter,
+        reporter, null);
+CombineOutputCollector<K, V> combineCollector;
+if (combinerRunner != null) {
+combineCollector= new CombineOutputCollector<K,V>(combineOutputCounter, reporter, conf);
+} else {
+combineCollector = null;
+}
+int minSpillsForCombine = job.getInt("min.num.spills.for.combine", 3);
+
+
+RawKeyValueIterator kvIter = Merger.merge(job, rfs,
+keyClass, valClass, codec,
+segmentList, job.getInt("io.sort.factor", 100),
+new Path(mapId.toString()),
+job.getOutputKeyComparator(), reporter,
+null, spilledRecordsCounter);
+
+//write merged output to disk
+long segmentStart = finalOut.getPos();
+Writer<K, V> writer =
+new Writer<K, V>(job, finalOut, keyClass, valClass, codec,
+spilledRecordsCounter);
+if (combinerRunner == null || numSubtask < minSpillsForCombine) {
+Merger.writeFile(kvIter, writer, reporter, job);
+} else {
+combineCollector.setWriter(writer);
+combinerRunner.combine(kvIter, combineCollector);
+}
+
+//close
+writer.close();
+
+// record offsets
+rec.startOffset = segmentStart;
+rec.rawLength = writer.getRawLength();
+rec.partLength = writer.getCompressedLength();
+spillRec.putIndex(rec, parts);
+}
+spillRec.writeToFile(finalIndexFile, job);
+finalOut.close();
+for(int i = 0; i < numSubtask; i++) {
+rfs.delete(filename[i],true);
+}
+}
+}
+
+  
   @SuppressWarnings("unchecked")
   private <INKEY,INVALUE,OUTKEY,OUTVALUE>
   void runNewMapper(final JobConf job,
@@ -917,7 +1646,16 @@ class MapTask extends Task {
     private ArrayList<SpillRecord> indexCacheList;
     private int totalIndexCacheMemory;
     private static final int INDEX_CACHE_MEMORY_LIMIT = 1024 * 1024;
+    
+    private  int subtaskId = -1;
 
+    public MapOutputBuffer(TaskUmbilicalProtocol umbilical, JobConf job,
+            TaskReporter reporter, int subtaskId
+            ) throws IOException, ClassNotFoundException {
+    	this(umbilical, job, reporter);
+    	this.subtaskId = subtaskId;
+    }
+    
     @SuppressWarnings("unchecked")
     public MapOutputBuffer(TaskUmbilicalProtocol umbilical, JobConf job,
                            TaskReporter reporter
@@ -934,7 +1672,12 @@ class MapTask extends Task {
       //sanity checks
       final float spillper = job.getFloat("io.sort.spill.percent",(float)0.8);
       final float recper = job.getFloat("io.sort.record.percent",(float)0.05);
-      final int sortmb = job.getInt("io.sort.mb", 100);
+      int mapBuf = job.getInt("io.sort.mb", 100);
+      int submapBuf = job.getInt("subtask.io.sort.mb", numSubMaps>0 ? (100/numSubMaps) : 30);
+      final int sortmb = numSubMaps>0?submapBuf:mapBuf; //= numSubMaps>0 ? (temp/numSubMaps) : temp;//job.getInt("io.sort.mb", 100);
+    		                   //numSubMaps>0 ? (100/numSubMaps) : 100);
+      
+      
       if (spillper > (float)1.0 || spillper < (float)0.0) {
         throw new IOException("Invalid \"io.sort.spill.percent\": " + spillper);
       }
@@ -1326,7 +2069,11 @@ class MapTask extends Task {
       // release sort buffer before the merge
       kvbuffer = null;
       mergeParts();
-      Path outputPath = mapOutputFile.getOutputFile();
+      Path outputPath = null;
+      if (subtaskId == -1)
+        outputPath = mapOutputFile.getOutputFile();
+      else
+    	outputPath = mapOutputFile.getSubtaskOutputFile(subtaskId);  
       fileOutputByteCounter.increment(rfs.getFileStatus(outputPath).getLen());
     }
 
@@ -1394,9 +2141,17 @@ class MapTask extends Task {
       try {
         // create spill file
         final SpillRecord spillRec = new SpillRecord(partitions);
-        final Path filename =
-            mapOutputFile.getSpillFileForWrite(numSpills, size);
+        final Path filename;
+        if (subtaskId == -1) {
+          filename =  mapOutputFile.getSpillFileForWrite(numSpills, size);
+        }
+        else {
+          filename = 
+         mapOutputFile.getSubtaskSpillFileForWrite(numSpills, size, subtaskId);
+        }
         out = rfs.create(filename);
+        //LOG.info("=== in sortAndSpill filename=" + filename + 
+        //		", subtaskId=" + subtaskId);
 
         final int endPosition = (kvend > kvstart)
           ? kvend
@@ -1459,9 +2214,17 @@ class MapTask extends Task {
 
         if (totalIndexCacheMemory >= INDEX_CACHE_MEMORY_LIMIT) {
           // create spill index file
-          Path indexFilename =
-              mapOutputFile.getSpillIndexFileForWrite(numSpills, partitions
+          Path indexFilename = null;
+          if (subtaskId == -1)
+        	indexFilename = 
+        	   mapOutputFile.getSpillIndexFileForWrite(numSpills, partitions
                   * MAP_OUTPUT_INDEX_RECORD_LENGTH);
+          else
+        	indexFilename = 
+        	  mapOutputFile.getSubtaskSpillIndexFileForWrite(numSpills, partitions
+                   * MAP_OUTPUT_INDEX_RECORD_LENGTH, subtaskId);
+        	  
+          System.out.println("=== in sortAndSpill indexFilename=" + indexFilename);
           spillRec.writeToFile(indexFilename, job);
         } else {
           indexCacheList.add(spillRec);
@@ -1487,8 +2250,16 @@ class MapTask extends Task {
       try {
         // create spill file
         final SpillRecord spillRec = new SpillRecord(partitions);
-        final Path filename =
-            mapOutputFile.getSpillFileForWrite(numSpills, size);
+        //final Path filename =
+        //    mapOutputFile.getSpillFileForWrite(numSpills, size);
+        final Path filename;
+        if (subtaskId == -1) {
+          filename =  mapOutputFile.getSpillFileForWrite(numSpills, size);
+        }
+        else {
+          filename = 
+         mapOutputFile.getSubtaskSpillFileForWrite(numSpills, size, subtaskId);
+        }
         out = rfs.create(filename);
         
         // we don't run the combiner for a single record
@@ -1524,9 +2295,18 @@ class MapTask extends Task {
         }
         if (totalIndexCacheMemory >= INDEX_CACHE_MEMORY_LIMIT) {
           // create spill index file
-          Path indexFilename =
-              mapOutputFile.getSpillIndexFileForWrite(numSpills, partitions
-                  * MAP_OUTPUT_INDEX_RECORD_LENGTH);
+          //Path indexFilename =
+          //    mapOutputFile.getSpillIndexFileForWrite(numSpills, partitions
+          //        * MAP_OUTPUT_INDEX_RECORD_LENGTH);
+        	Path indexFilename = null;
+            if (subtaskId == -1)
+          	indexFilename = 
+          	   mapOutputFile.getSpillIndexFileForWrite(numSpills, partitions
+                    * MAP_OUTPUT_INDEX_RECORD_LENGTH);
+            else
+          	indexFilename = 
+          	  mapOutputFile.getSubtaskSpillIndexFileForWrite(numSpills, partitions
+                     * MAP_OUTPUT_INDEX_RECORD_LENGTH, subtaskId);
           spillRec.writeToFile(indexFilename, job);
         } else {
           indexCacheList.add(spillRec);
@@ -1614,39 +2394,74 @@ class MapTask extends Task {
       long finalIndexFileSize = 0;
       final Path[] filename = new Path[numSpills];
       final TaskAttemptID mapId = getTaskID();
-
-      for(int i = 0; i < numSpills; i++) {
-        filename[i] = mapOutputFile.getSpillFile(i);
-        finalOutFileSize += rfs.getFileStatus(filename[i]).getLen();
-      }
+      
+      if (subtaskId == -1)
+        for(int i = 0; i < numSpills; i++) {
+          filename[i] = mapOutputFile.getSpillFile(i);
+          finalOutFileSize += rfs.getFileStatus(filename[i]).getLen();
+        }
+      else
+        for(int i = 0; i < numSpills; i++) {
+    	  filename[i] = mapOutputFile.getSubtaskSpillFile(i, subtaskId);
+    	  finalOutFileSize += rfs.getFileStatus(filename[i]).getLen();
+        }  
       if (numSpills == 1) { //the spill is the final output
-        rfs.rename(filename[0],
-            new Path(filename[0].getParent(), "file.out"));
+    	  if (subtaskId == -1)
+            rfs.rename(filename[0],
+                    new Path(filename[0].getParent(), "file.out"));
+    	  else
+    		rfs.rename(filename[0],
+    		        new Path(filename[0].getParent(), subtaskId + "file.out"));
         if (indexCacheList.size() == 0) {
-          rfs.rename(mapOutputFile.getSpillIndexFile(0),
-              new Path(filename[0].getParent(),"file.out.index"));
+        	if (subtaskId == -1)
+              rfs.rename(mapOutputFile.getSpillIndexFile(0),
+                new Path(filename[0].getParent(),"file.out.index"));
+        	else
+              rfs.rename(mapOutputFile.getSubtaskSpillIndexFile(0, subtaskId),
+        	    new Path(filename[0].getParent(),"file.out.index"));
         } else {
-          indexCacheList.get(0).writeToFile(
+          if (subtaskId == -1)
+            indexCacheList.get(0).writeToFile(
                 new Path(filename[0].getParent(),"file.out.index"), job);
+          else
+            indexCacheList.get(0).writeToFile(
+                new Path(filename[0].getParent(),subtaskId+"file.out.index"), job);  
         }
         return;
       }
 
       // read in paged indices
-      for (int i = indexCacheList.size(); i < numSpills; ++i) {
-        Path indexFileName = mapOutputFile.getSpillIndexFile(i);
-        indexCacheList.add(new SpillRecord(indexFileName, job, null));
-      }
+      if (subtaskId == -1)
+        for (int i = indexCacheList.size(); i < numSpills; ++i) {
+          Path indexFileName = mapOutputFile.getSpillIndexFile(i);
+          indexCacheList.add(new SpillRecord(indexFileName, job, null));
+        }
+      else
+    	for (int i = indexCacheList.size(); i < numSpills; ++i) {
+    	  Path indexFileName = mapOutputFile.getSubtaskSpillIndexFile(i, subtaskId);
+    	  indexCacheList.add(new SpillRecord(indexFileName, job, null));
+    	}
 
       //make correction in the length to include the sequence file header
       //lengths for each partition
       finalOutFileSize += partitions * APPROX_HEADER_LENGTH;
       finalIndexFileSize = partitions * MAP_OUTPUT_INDEX_RECORD_LENGTH;
-      Path finalOutputFile =
+      Path finalOutputFile = null;
+      Path finalIndexFile = null;
+      
+      if (subtaskId == -1) {
+        finalOutputFile =
           mapOutputFile.getOutputFileForWrite(finalOutFileSize);
-      Path finalIndexFile =
-          mapOutputFile.getOutputIndexFileForWrite(finalIndexFileSize);
-
+        finalIndexFile =
+          mapOutputFile.getOutputIndexFileForWrite(finalIndexFileSize); 
+      }
+      else {
+        finalOutputFile =
+          mapOutputFile.getSubtaskOutputFileForWrite(finalOutFileSize,subtaskId);
+        finalIndexFile =
+          mapOutputFile.getSubtaskOutputIndexFileForWrite(finalIndexFileSize,subtaskId);
+      }
+      
       //The output stream for the final single output file
       FSDataOutputStream finalOut = rfs.create(finalOutputFile, true, 4096);
 
@@ -1698,7 +2513,7 @@ class MapTask extends Task {
           RawKeyValueIterator kvIter = Merger.merge(job, rfs,
                          keyClass, valClass, codec,
                          segmentList, job.getInt("io.sort.factor", 100),
-                         new Path(mapId.toString()),
+                         subtaskId==-1 ? new Path(mapId.toString()) : new Path(mapId.toString()+subtaskId),
                          job.getOutputKeyComparator(), reporter,
                          null, spilledRecordsCounter);
 
@@ -1724,6 +2539,8 @@ class MapTask extends Task {
           spillRec.putIndex(rec, parts);
         }
         spillRec.writeToFile(finalIndexFile, job);
+        LOG.info("===mergepart: outfile="+finalOutputFile+" subtask="+subtaskId);
+        
         finalOut.close();
         for(int i = 0; i < numSpills; i++) {
           rfs.delete(filename[i],true);

@@ -62,4 +62,12 @@ interface MRConstants {
   public static final String FOR_REDUCE_TASK = "for-reduce-task";
   
   public static final String WORKDIR = "work";
+  
+  public static final boolean IS_SUBTASK_OUTPUT_ON = true;
+  public static final int MAX_NUM_SUBTASKS = 32;
+  public static final String FROM_MAP_SUBTASK = "form-map-subtask";
+  public static final long DEFAULT_SUBBLOCK_SIZE = 
+	                         org.apache.hadoop.hdfs.protocol.FSConstants.DEFAULT_SUBBLOCK_SIZE;
+  public static final String SUBTASK_OUTPUT_ON = "mapreduce.subtask.output.on";
+  public static final String SUBTASK_ON = "mapreduce.subtask.on";
 }

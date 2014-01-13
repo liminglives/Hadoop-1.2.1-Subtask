@@ -72,6 +72,15 @@ class BlockSender implements java.io.Closeable, FSConstants {
   private DataTransferThrottler throttler;
   private final String clientTraceFmt; // format of client trace log message
   private final MemoizedBlock memoizedBlock;
+  
+  private long currSubblockLength = 0;
+  private DataNode dataNode;
+  private long offsetInSubblock = 0;
+  private int index = 0;
+  private int maxIndex = 0;
+  
+  private final boolean isSubblock;
+  private final long subblockLength;
 
   /**
    * Minimum buffer used while sending data to clients. Used only if
@@ -95,6 +104,8 @@ class BlockSender implements java.io.Closeable, FSConstants {
    * disabled.
    */
   private static final long LONG_READ_THRESHOLD_BYTES = 256 * 1024;
+  
+  
 
   BlockSender(Block block, long startOffset, long length,
               boolean corruptChecksumOk, boolean chunkOffsetOK,
@@ -118,6 +129,10 @@ class BlockSender implements java.io.Closeable, FSConstants {
       this.readaheadLength = datanode.getReadaheadLength();
       this.readaheadPool = datanode.readaheadPool;
       this.shouldDropCacheBehindRead = datanode.shouldDropCacheBehindReads();
+      
+      this.dataNode = datanode;
+      this.isSubblock = datanode.isSubBlock;
+      this.subblockLength = datanode.subblockLength;
       
       if ( !corruptChecksumOk || datanode.data.metaFileExists(block) ) {
         checksumIn = new DataInputStream(
@@ -188,8 +203,27 @@ class BlockSender implements java.io.Closeable, FSConstants {
         }
       }
       seqno = 0;
-
-      blockIn = datanode.data.getBlockInputStream(block, offset); // seek to offset
+      
+      //System.out.println("==== startOffset="+startOffset+", offset="+offset+",length="+length);
+      if (isSubblock/*FSConstants.IS_SUBBLOCK_ON_V2*/) { 
+    	  
+    	  blockIn = datanode.data.getSubblockInputStream(block, offset);
+    	  //endOffset = offset + datanode.data.getVisibleSubblockLength(block, offset);
+    	  currSubblockLength = dataNode.data.getVisibleSubblockLength(block, offset);
+    	  offsetInSubblock = offset % subblockLength/*FSConstants.DEFAULT_SUBBLOCK_SIZE*/;
+    	  index = (int)((offset+1) / subblockLength/*FSConstants.DEFAULT_SUBBLOCK_SIZE*/);
+    	  maxIndex = (int)(blockLength / subblockLength/*FSConstants.DEFAULT_SUBBLOCK_SIZE*/);
+    	  if ((blockLength % subblockLength/*FSConstants.DEFAULT_SUBBLOCK_SIZE*/) > 0)
+    		  maxIndex++;
+    	  //System.out.println("=====Liming: getSubblockInputStream: "+
+    		//	  " currSubblockLength="+currSubblockLength+
+    		//	  " offsetInSubblock="+offsetInSubblock+
+    		//	  " index="+index+
+    		//	  " maxIndex="+maxIndex);
+      }
+      else
+          blockIn = datanode.data.getBlockInputStream(block, offset); // seek to offset
+      
       if (blockIn instanceof FileInputStream) {
         blockInFd = ((FileInputStream) blockIn).getFD();
       } else {
@@ -265,6 +299,68 @@ class BlockSender implements java.io.Closeable, FSConstants {
     // otherwise just return the same exception.
     return ioe;
   }
+  
+  private void closeBlockIn() throws IOException {
+	  if (blockInFd != null && shouldDropCacheBehindRead && isLongRead()) {
+	      // drop the last few MB of the file from cache
+	      try {
+	        NativeIO.posixFadviseIfPossible(blockInFd, lastCacheDropOffset, offset
+	            - lastCacheDropOffset, NativeIO.POSIX_FADV_DONTNEED);
+	      } catch (Exception e) {
+	        LOG.warn("Unable to drop cache on file close", e);
+	      }
+	    }
+	    if (curReadahead != null) {
+	      curReadahead.cancel();
+	    }
+	  
+	    IOException ioe = null;
+
+	    // close data file
+	    if(blockIn!=null) {
+	      try {
+	        blockIn.close();
+	      } catch (IOException e) {
+	        ioe = e;
+	      }
+	      blockIn = null;
+	      blockInFd = null;
+	    }
+	    // throw IOException if there is any
+	    if(ioe!= null) {
+	      throw ioe;
+	    }
+  }
+  
+  private void updateSubblockInputStream(Block block, long offsetInBlock) 
+         throws IOException {
+	//if (blockIn != null)
+	//	  blockIn.close();
+	closeBlockIn();
+	
+	//System.out.println("=====updateSubblockInputStream: offsetInSubblock="+offsetInSubblock+
+	//		", index="+index+
+	//		", blockInPosition="+blockInPosition);
+	if (currSubblockLength != offsetInSubblock) {
+		
+		throw new IOException("currSubblockLength "+currSubblockLength
+				+" is not equal to offsetInSubblock "+offsetInSubblock);
+	}
+	if (currSubblockLength%512 != 0) {
+		throw new IOException("currSubblockLength "+currSubblockLength
+				+" mochu 512 is not equal to 0 ");
+	}
+	//index++;
+	long off = index * subblockLength/*FSConstants.DEFAULT_SUBBLOCK_SIZE*/;
+	blockIn = dataNode.data.getSubblockInputStream(block, off);
+	currSubblockLength = dataNode.data.getVisibleSubblockLength(block, off);
+    offsetInSubblock = 0; 
+    if (blockIn instanceof FileInputStream) {
+        blockInFd = ((FileInputStream) blockIn).getFD();
+      } else {
+        blockInFd = null;
+      }
+  }
 
   /**
    * Sends upto maxChunks chunks of data.
@@ -280,6 +376,18 @@ class BlockSender implements java.io.Closeable, FSConstants {
 
     int len = (int) Math.min(endOffset - offset,
         (((long) bytesPerChecksum) * ((long) maxChunks)));
+    
+    boolean isNeedUpdateSubblockStream = false;
+    if (isSubblock/*FSConstants.IS_SUBBLOCK_ON_V2*/) {
+    	int remain = (int)(currSubblockLength - offsetInSubblock);
+    	if (remain <= len) {
+    		len = remain;
+    		isNeedUpdateSubblockStream = true;
+    	}
+    }
+    //System.out.println("=== len="+len+
+    //		" currSubblockLength="+currSubblockLength+
+    //		" offsetInSubblock="+ offsetInSubblock );
     
     // truncate len so that any partial chunks will be sent as a final packet.
     // this is not necessary for correctness, but partial chunks are 
@@ -334,7 +442,7 @@ class BlockSender implements java.io.Closeable, FSConstants {
     if (blockInPosition < 0) {
       //normal transfer
       IOUtils.readFully(blockIn, buf, dataOff, len);
-
+      //System.out.println("=== blockInPosition<0");
       if (verifyChecksum) {
         int dOff = dataOff;
         int cOff = checksumOff;
@@ -345,6 +453,15 @@ class BlockSender implements java.io.Closeable, FSConstants {
           int dLen = Math.min(dLeft, bytesPerChecksum);
           checksum.update(buf, dOff, dLen);
           if (!checksum.compare(buf, cOff)) {
+        	System.out.println("Checksum failed at " + 
+                    (offset + len - dLeft) + 
+                    " offset="+offset+
+                    " len="+len+
+                    " dlen="+dLen+
+                    " currSubblockLength="+currSubblockLength+ 
+                    " offInsubblock="+offsetInSubblock+
+                    " index="+index+
+                    " maxIndex="+maxIndex);
             throw new ChecksumException("Checksum failed at " + 
                                         (offset + len - dLeft), len);
           }
@@ -356,12 +473,15 @@ class BlockSender implements java.io.Closeable, FSConstants {
       
       // only recompute checksum if we can't trust the meta data due to 
       // concurrent writes
+      if (!isSubblock/*FSConstants.IS_SUBBLOCK_ON_V2*/)
       if (memoizedBlock.hasBlockChanged(len)) {
+    	  //System.out.println("============ hasBlockChanged");
         ChecksumUtil.updateChunkChecksum(
           buf, checksumOff, dataOff, len, checksum
         );
       }
       
+      offsetInSubblock += len;
       try {
         out.write(buf, 0, dataOff + len);
       } catch (IOException e) {
@@ -370,10 +490,11 @@ class BlockSender implements java.io.Closeable, FSConstants {
     } else {
       try {
         //use transferTo(). Checks on out and blockIn are already done. 
+    	// System.out.println("=====blockInPosition="+blockInPosition);
         SocketOutputStream sockOut = (SocketOutputStream) out;
         FileChannel fileChannel = ((FileInputStream) blockIn).getChannel();
-
-        if (memoizedBlock.hasBlockChanged(len)) {
+   
+        if (!isSubblock/*FSConstants.IS_SUBBLOCK_ON_V2*/ && memoizedBlock.hasBlockChanged(len)) {
           fileChannel.position(blockInPosition);
           IOUtils.readFileChannelFully(
             fileChannel,
@@ -381,7 +502,7 @@ class BlockSender implements java.io.Closeable, FSConstants {
             dataOff,
             len
           );
-          
+          System.out.println("============ hasBlockChanged");
           ChecksumUtil.updateChunkChecksum(
             buf, checksumOff, dataOff, len, checksum
           );          
@@ -390,10 +511,20 @@ class BlockSender implements java.io.Closeable, FSConstants {
           //first write the packet
           sockOut.write(buf, 0, dataOff);
           // no need to flush. since we know out is not a buffered stream.
-          sockOut.transferToFully(fileChannel, blockInPosition, len);
+          if (isSubblock/*FSConstants.IS_SUBBLOCK_ON_V2*/)
+        	  sockOut.transferToFully(fileChannel, offsetInSubblock, len);
+          else
+              sockOut.transferToFully(fileChannel, blockInPosition, len);
         }
 
         blockInPosition += len;
+        offsetInSubblock += len;
+        if (isSubblock/*FSConstants.IS_SUBBLOCK_ON_V2*/ && 
+           !(blockInPosition % subblockLength/*FSConstants.DEFAULT_SUBBLOCK_SIZE*/ ==
+        	   offsetInSubblock % subblockLength/*FSConstants.DEFAULT_SUBBLOCK_SIZE*/ )) {
+           System.out.println("blockInPosition " +blockInPosition+
+        		   " not fit on offsetInSubblock "+offsetInSubblock);
+        }
 
       } catch (IOException e) {
       /* exception while writing to the client (well, with transferTo(),
@@ -405,6 +536,13 @@ class BlockSender implements java.io.Closeable, FSConstants {
 
     if (throttler != null) { // rebalancing so throttle
       throttler.throttle(packetLen);
+    }
+    try{
+    if (isNeedUpdateSubblockStream && (++index) < maxIndex)
+    	updateSubblockInputStream(block, blockInPosition); 
+    } catch (IOException e) {
+    	LOG.error("updateSubblockInputStream exception " + e + 
+    			", index="+index +" maxIndex="+maxIndex);
     }
 
     return len;
@@ -468,6 +606,7 @@ class BlockSender implements java.io.Closeable, FSConstants {
         
         // blockInPosition also indicates sendChunks() uses transferTo.
         blockInPosition = fileChannel.position();
+        offsetInSubblock = blockInPosition;
         streamForSendChunks = baseStream;
         
         // assure a mininum buffer size.
@@ -485,12 +624,19 @@ class BlockSender implements java.io.Closeable, FSConstants {
       }
 
       ByteBuffer pktBuf = ByteBuffer.allocate(pktSize);
-
+      //System.out.println("==== maxChunksPerPacket="+maxChunksPerPacket);
       while (endOffset > offset) {
         manageOsCache();
-        long len = sendChunks(pktBuf, maxChunksPerPacket, 
-                              streamForSendChunks);
+        long len;
+        try {
+         len = sendChunks(pktBuf, maxChunksPerPacket, 
+                              streamForSendChunks); }
+        catch(IOException e) {
+        	System.out.println("send Chunks exception:"+e);
+        	throw e;
+        }
         offset += len;
+        //System.out.println("=== len="+len);
         totalRead += len + ((len + bytesPerChecksum - 1)/bytesPerChecksum*
                             checksumSize);
         seqno++;
@@ -576,6 +722,14 @@ class BlockSender implements java.io.Closeable, FSConstants {
       this.blockLength = blockLength;
       this.fsDataset = fsDataset;
       this.block = block;
+    }
+    
+    public void setInputStream(InputStream inputStream) {
+    	this.inputStream = inputStream;
+    }
+    
+    public void setSubblockLength(long blockLength) {
+    	this.blockLength = blockLength;
     }
 
     // logic: if we are starting or ending on a partial chunk and the block

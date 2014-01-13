@@ -65,6 +65,7 @@ class TaskInProgress {
   private String jobFile = null;
   private final TaskSplitMetaInfo splitInfo;
   private int numMaps;
+  private int numSubMaps;
   private int partition;
   private JobTracker jobtracker;
   private TaskID id;
@@ -88,6 +89,8 @@ class TaskInProgress {
   private volatile boolean skipping = false;
   private boolean jobCleanup = false; 
   private boolean jobSetup = false;
+  
+  private final boolean isSubtaskOutputOn;
    
   // The 'next' usable taskid of this tip
   int nextTaskId = 0;
@@ -151,8 +154,19 @@ class TaskInProgress {
     this.partition = partition;
     this.maxSkipRecords = SkipBadRecords.getMapperMaxSkipRecords(conf);
     this.numSlotsRequired = numSlotsRequired;
+    this.isSubtaskOutputOn = conf.getBoolean(MRConstants.SUBTASK_OUTPUT_ON, 
+            MRConstants.IS_SUBTASK_OUTPUT_ON);
     setMaxTaskAttempts();
     init(jobid);
+  }
+  public TaskInProgress(JobID jobid, String jobFile, 
+          TaskSplitMetaInfo split, 
+          JobTracker jobtracker, JobConf conf, 
+          JobInProgress job, int partition,
+          int numSlotsRequired,
+          int numSubMaps) {
+	  this(jobid, jobFile, split, jobtracker, conf, job, partition, numSlotsRequired);
+	  this.numSubMaps = numSubMaps;
   }
         
   /**
@@ -171,8 +185,19 @@ class TaskInProgress {
     this.conf = conf;
     this.maxSkipRecords = SkipBadRecords.getReducerMaxSkipGroups(conf);
     this.numSlotsRequired = numSlotsRequired;
+    this.isSubtaskOutputOn = conf.getBoolean(MRConstants.SUBTASK_OUTPUT_ON, 
+    		                                 MRConstants.IS_SUBTASK_OUTPUT_ON);
     setMaxTaskAttempts();
     init(jobid);
+  }
+  
+  public TaskInProgress(JobID jobid, String jobFile, 
+          int numMaps, 
+          int partition, JobTracker jobtracker, JobConf conf,
+          JobInProgress job, int numSlotsRequired, int numSubMaps) {
+	  this(jobid, jobFile, numMaps, partition, jobtracker, conf, job, numSlotsRequired);
+	  this.numSubMaps = numSubMaps;
+	  System.out.println("taskinprocess-construct: numsubmaps="+numSubMaps);
   }
   
   /**
@@ -577,7 +602,14 @@ class TaskInProgress {
     if(skipping) {
       failedRanges.updateState(status);
     }
-    
+    /*
+    if (oldStatus != null)
+    System.out.println("taskinprocess-updateStatus: before taskid="+taskid+
+    		"oldsubtaskStatus="+Long.toBinaryString(taskStatuses.get(taskid).getStatusSubtasks())+
+			  ",new="+status.getStatusSubtasks());
+    else
+    	System.out.println("taskinprocess-updateStatus: taskid="+taskid+"oldsubtaskStatus=null"+
+  			  ",new="+status.getStatusSubtasks());*/
     if (oldStatus != null) {
       TaskStatus.State oldState = oldStatus.getRunState();
       TaskStatus.State newState = status.getRunState();
@@ -639,8 +671,21 @@ class TaskInProgress {
     }
 
     if (!isCleanupAttempt(taskid)) {
+    	//System.out.println("taskinprocess: put taskid="+taskid);
       taskStatuses.put(taskid, status);
     } else {
+      if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/) {
+    	  
+    	  long subtasksStatus = taskStatuses.get(taskid).getStatusSubtasks();
+    	  if (subtasksStatus != status.getStatusSubtasks()) {
+    		  changed = true;
+    	  }
+    	  //System.out.println("==taskinprocess-updateStatus: taskid="+taskid+"oldsubtaskStatus="+Long.toBinaryString(subtasksStatus)+
+    	//		  ",new="+status.getStatusSubtasks());
+    	  taskStatuses.get(taskid).statusUpdate(status.getRunState(),
+    		        status.getProgress(), status.getStateString(), status.getPhase(),
+    		        status.getFinishTime(),status.getNumSubtasks(), status.getStatusSubtasks());	
+      } else
       taskStatuses.get(taskid).statusUpdate(status.getRunState(),
         status.getProgress(), status.getStateString(), status.getPhase(),
         status.getFinishTime());
@@ -1021,11 +1066,19 @@ class TaskInProgress {
         LOG.debug("attempt " + numTaskFailures + " sending skippedRecords "
           + failedRanges.getIndicesCount());
       }
-      t = new MapTask(jobFile, taskid, partition, splitInfo.getSplitIndex(),
+      if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/)
+    	  t = new MapTask(jobFile, taskid, partition, splitInfo.getSplitIndex(),
+                  numSlotsNeeded, numSubMaps);
+      else
+          t = new MapTask(jobFile, taskid, partition, splitInfo.getSplitIndex(),
                       numSlotsNeeded);
     } else {
-      t = new ReduceTask(jobFile, taskid, partition, numMaps, 
-                         numSlotsNeeded);
+    	if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/)
+          t = new ReduceTask(jobFile, taskid, partition, numMaps, 
+                         numSlotsNeeded, numSubMaps);
+    	else
+    	  t = new ReduceTask(jobFile, taskid, partition, numMaps, 
+                numSlotsNeeded);
     }
     if (jobCleanup) {
       t.setJobCleanupTask();

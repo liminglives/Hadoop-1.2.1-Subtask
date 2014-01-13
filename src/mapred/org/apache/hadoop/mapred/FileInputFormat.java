@@ -155,6 +155,7 @@ public abstract class FileInputFormat<K, V> implements InputFormat<K, V> {
     if (dirs.length == 0) {
       throw new IOException("No input paths specified in job");
     }
+    //LOG.info("---liming--- number of input dirs: " + dirs.length);
 
     // get tokens for all the required FileSystems..
     TokenCache.obtainTokensForNamenodes(job.getCredentials(), dirs, job);

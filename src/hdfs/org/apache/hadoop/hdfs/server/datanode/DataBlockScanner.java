@@ -437,6 +437,10 @@ class DataBlockScanner implements Runnable {
     throttler.setBandwidth(Math.min(bw, MAX_SCAN_RATE));
   }
   
+  public void verifyBlockPublically(Block block) {
+	  verifyBlock(block);
+  }
+  
   private void verifyBlock(Block block) {
     
     BlockSender blockSender = null;
@@ -445,6 +449,7 @@ class DataBlockScanner implements Runnable {
      * transient errors. How do we flush block data from kernel 
      * buffers before the second read? 
      */
+    //System.out.println("enter verifyBlock");
     for (int i=0; i<2; i++) {
       boolean second = (i > 0);
       

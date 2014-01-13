@@ -95,6 +95,7 @@ public class JobInProgress {
   TaskInProgress cleanup[] = new TaskInProgress[0];
   TaskInProgress setup[] = new TaskInProgress[0];
   int numMapTasks = 0;
+  int numSubMapTasks = 0;
   int numReduceTasks = 0;
   final long memoryPerMap;
   final long memoryPerReduce;
@@ -229,6 +230,9 @@ public class JobInProgress {
   long startTime;
   long launchTime;
   long finishTime;
+  
+  private long avgMapTime = 0;
+  private long avgReduceTime = 0;
 
   // First *task launch time
   final Map<TaskType, Long> firstTaskLaunchTimes =
@@ -251,6 +255,7 @@ public class JobInProgress {
   private String submitHostAddress;
   private String user;
   private String historyFile = "";
+  private final boolean isSubtaskOutputOn;
   
   // Per-job counters
   public static enum Counter { 
@@ -321,6 +326,9 @@ public class JobInProgress {
     this.conf = conf;
     this.jobId = jobid;
     this.numMapTasks = conf.getNumMapTasks();
+    this.numSubMapTasks = conf.getNumMapSubTasks();//numMapTasks * 10;
+    this.isSubtaskOutputOn = conf.getBoolean(MRConstants.SUBTASK_OUTPUT_ON, 
+    		                                 MRConstants.IS_SUBTASK_OUTPUT_ON);
     this.numReduceTasks = conf.getNumReduceTasks();
     this.maxLevel = NetworkTopology.DEFAULT_HOST_LEVEL;
     this.anyCacheLevel = this.maxLevel+1;
@@ -356,7 +364,7 @@ public class JobInProgress {
     checkTaskLimits();
 
     this.taskCompletionEvents = new ArrayList<TaskCompletionEvent>
-      (numMapTasks + numReduceTasks + 10);
+      ((isSubtaskOutputOn ? (numSubMapTasks+numMapTasks) : numMapTasks) + numReduceTasks + 10);
     try {
       this.userUGI = UserGroupInformation.getCurrentUser();
     } catch (IOException ie){
@@ -438,13 +446,16 @@ public class JobInProgress {
       this.submitHostName = conf.getJobSubmitHostName();
       this.submitHostAddress = conf.getJobSubmitHostAddress();
       this.numMapTasks = conf.getNumMapTasks();
+      this.numSubMapTasks = conf.getNumMapSubTasks();//numMapTasks * 10;
       this.numReduceTasks = conf.getNumReduceTasks();
+      this.isSubtaskOutputOn = conf.getBoolean(MRConstants.SUBTASK_OUTPUT_ON, 
+              MRConstants.IS_SUBTASK_OUTPUT_ON);
 
       this.memoryPerMap = conf.getMemoryForMapTask();
       this.memoryPerReduce = conf.getMemoryForReduceTask();
 
       this.taskCompletionEvents = new ArrayList<TaskCompletionEvent>
-      (numMapTasks + numReduceTasks + 10);
+      ((isSubtaskOutputOn ? numSubMapTasks : numMapTasks) + numReduceTasks + 10);
 
       // Construct the jobACLs
       status.setJobACLs(jobtracker.getJobACLsManager().constructJobACLs(conf));
@@ -740,14 +751,38 @@ public class JobInProgress {
     this.queueMetrics.addWaitingReduces(getJobID(), numReduceTasks);
 
     maps = new TaskInProgress[numMapTasks];
+    int numsubtask = 0;
     for(int i=0; i < numMapTasks; ++i) {
-      inputLength += splits[i].getInputDataLength();
+      long len = splits[i].getInputDataLength();
+      //inputLength += splits[i].getInputDataLength();
+      inputLength += len;
+      
+      if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/) {
+    	  long subblockLength = conf.getLong(
+    			  "dfs.datanode.subblock.length", MRConstants.DEFAULT_SUBBLOCK_SIZE);
+    	  int num = (int)(len / subblockLength/*MRConstants.DEFAULT_SUBBLOCK_SIZE*/);
+    	  if (len % subblockLength/*MRConstants.DEFAULT_SUBBLOCK_SIZE*/ != 0)
+    		  num++;
+    	  numsubtask += num;
+    	  System.out.println("==== numsubtask="+numsubtask+", num="+num+", len="+len);
+    	  maps[i] = new TaskInProgress(jobId, jobFile, 
+                  splits[i], 
+                  jobtracker, conf, this, i, numSlotsPerMap, num);
+      }
+      else  
       maps[i] = new TaskInProgress(jobId, jobFile, 
                                    splits[i], 
                                    jobtracker, conf, this, i, numSlotsPerMap);
     }
     LOG.info("Input size for job " + jobId + " = " + inputLength
         + ". Number of splits = " + splits.length);
+    System.out.println("Input size for job " + jobId + " = " + inputLength
+            + ". Number of splits = " + splits.length +", numsubtasks="+numsubtask+
+            ",numSubMapTasks="+numSubMapTasks);
+    if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/ && this.numSubMapTasks != numsubtask) {
+        throw new IOException("jobinprocess-inittasks: numSubMapTasks "+numSubMapTasks 
+        		+" is not equal to numsubtask "+numsubtask);    	
+    }
 
     // Set localityWaitFactor before creating cache
     localityWaitFactor = 
@@ -764,6 +799,11 @@ public class JobInProgress {
     //
     this.reduces = new TaskInProgress[numReduceTasks];
     for (int i = 0; i < numReduceTasks; i++) {
+      if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/)
+    	  reduces[i] = new TaskInProgress(jobId, jobFile, 
+                  numMapTasks, i, 
+                  jobtracker, conf, this, numSlotsPerReduce, numSubMapTasks);
+      else
       reduces[i] = new TaskInProgress(jobId, jobFile, 
                                       numMapTasks, i, 
                                       jobtracker, conf, this, numSlotsPerReduce);
@@ -1113,7 +1153,30 @@ public class JobInProgress {
       }
     }
     
+    long subtaskcompletion = 0;
+
+    if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/)
+    if (tip.getTaskStatus(taskid)!=null) { 
+    	subtaskcompletion = status.getStatusSubtasks() ^ 
+                    tip.getTaskStatus(taskid).getStatusSubtasks();
+    	//System.out.println("++jobinprocess-updatetaskstatus: taskid="+taskid+
+        //                 ",newStatusSubtasks="+status.getStatusSubtasks()+
+		//		  ",oldStatusSubtasks="+tip.getTaskStatus(taskid).getStatusSubtasks()+
+		//		  ",state="+status.getRunState()); 
+    }
+    else {
+    	subtaskcompletion = status.getStatusSubtasks();
+    //	System.out.println("++jobinprocess-updatetaskstatus: taskid="+taskid+
+      //          ",newStatusSubtasks="+status.getStatusSubtasks()+
+	//	  ",oldStatusSubtasks=null"+
+	//	  ",state="+status.getRunState()); 
+    }
+    
+    
     boolean change = tip.updateStatus(status);
+    if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/ && subtaskcompletion!=0)
+    	change = true;
+    //System.out.println("    change="+change);
     if (change) {
       TaskStatus.State state = status.getRunState();
       // get the TaskTrackerStatus where the task ran 
@@ -1136,6 +1199,35 @@ public class JobInProgress {
 
       TaskCompletionEvent taskEvent = null;
       if (state == TaskStatus.State.SUCCEEDED) {
+    	if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/) {
+    		
+          /*
+          if (first)
+        	  subtaskcompletion = tip.getTaskStatus(taskid).getStatusSubtasks();
+          else
+        	  subtaskcompletion = status.getStatusSubtasks() ^ 
+                                        tip.getTaskStatus(taskid).getStatusSubtasks();*/
+    		
+    	  //if (subtaskcompletion != 0) {
+    		  taskEvent = new TaskCompletionEvent(
+                      taskCompletionEventTracker, 
+                      taskid,
+                      tip.idWithinJob(),
+                      status.getIsMap() &&
+                      !tip.isJobCleanupTask() &&
+                      !tip.isJobSetupTask(),
+                      TaskCompletionEvent.Status.SUCCEEDED,
+                      httpTaskLogLocation,
+                      subtaskcompletion
+                     );
+    	  //}	
+    		  System.out.println("======jobinprocess-updatetaskstatus-succeeded: taskid="+taskid+
+    				  "subtaskcompletion="+
+    				  subtaskcompletion+",newStatusSubtasks="+status.getStatusSubtasks()+
+    				  ",oldStatusSubtasks="+tip.getTaskStatus(taskid).getStatusSubtasks());
+    	  //tip.getTaskStatus(taskid).setStatusSubtasks(status.getStatusSubtasks());
+    	} 
+    	else 
         taskEvent = new TaskCompletionEvent(
                                             taskCompletionEventTracker, 
                                             taskid,
@@ -1148,6 +1240,11 @@ public class JobInProgress {
                                            );
         taskEvent.setTaskRunTime((int)(status.getFinishTime() 
                                        - status.getStartTime()));
+        if (status.getIsMap()) {
+        	avgMapTime += (status.getFinishTime() - status.getStartTime());
+        } else
+        	avgReduceTime += (status.getFinishTime() - status.getStartTime());
+        
         tip.setSuccessEventNumber(taskCompletionEventTracker); 
       } else if (state == TaskStatus.State.COMMIT_PENDING) {
         // If it is the first attempt reporting COMMIT_PENDING
@@ -1202,7 +1299,7 @@ public class JobInProgress {
                                             taskCompletionStatus, 
                                             httpTaskLogLocation
                                            );
-      }          
+      }      
 
       // Add the 'complete' task i.e. successful/failed
       // It _is_ safe to add the TaskCompletionEvent.Status.SUCCEEDED
@@ -1225,7 +1322,39 @@ public class JobInProgress {
           }
         }
       }
+      //System.out.println(" ~~~~~~~ state="+state+", taskEvent="+(taskEvent==null?true:false));
+      if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/ && (state == TaskStatus.State.RUNNING ) && 
+    		  taskEvent == null) {
+    	  /*
+          if (first)
+        	  subtaskcompletion = tip.getTaskStatus(taskid).getStatusSubtasks();
+          else
+        	  subtaskcompletion = status.getStatusSubtasks() ^ 
+                                        tip.getTaskStatus(taskid).getStatusSubtasks();
+                                        */
+    	  if (subtaskcompletion != 0) {
+    		  taskEvent = new TaskCompletionEvent(
+                      taskCompletionEventTracker, 
+                      taskid,
+                      tip.idWithinJob(),
+                      status.getIsMap() &&
+                      !tip.isJobCleanupTask() &&
+                      !tip.isJobSetupTask(),
+                      TaskCompletionEvent.Status.RUNNING,
+                      httpTaskLogLocation,
+                      subtaskcompletion
+                     );
+    		  //tip.getTaskStatus(taskid).setStatusSubtasks(status.getStatusSubtasks());
+    		  this.taskCompletionEvents.add(taskEvent);
+    	  }
+    	  //System.out.println("====jobinprocess-updatetaskstatus-running: taskid="+taskid+
+    	//		  "subtaskcompletion="+
+			//	  subtaskcompletion+",newStatusSubtasks="+status.getStatusSubtasks()+
+			//	  ",oldStatusSubtasks="+tip.getTaskStatus(taskid).getStatusSubtasks());
+      }
     }
+    
+    
         
     //
     // Update JobInProgress status
@@ -2798,6 +2927,14 @@ public class JobInProgress {
       this.finishTime = jobtracker.getClock().getTime();
       LOG.info("Job " + this.status.getJobID() + 
       " has completed successfully.");
+      System.out.println("===== liming======================  " +
+    		  "\n job name = "+ this.getProfile().getJobName() +
+      		"\n sumMapTime="+avgMapTime+", numMapTask="+numMapTasks+
+    		  "\n sumReduceTime="+avgReduceTime+", numReduceTask="+numReduceTasks);
+      LOG.error("===== liming======================  " +
+    		  "\n job name = "+ this.getProfile().getJobName() +
+        		"\n sumMapTime="+avgMapTime+", numMapTask="+numMapTasks+
+      		  "\n sumReduceTime="+avgReduceTime+", numReduceTask="+numReduceTasks);
 
       // Log the job summary (this should be done prior to logging to 
       // job-history to ensure job-counters are in-sync 

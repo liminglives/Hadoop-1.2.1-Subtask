@@ -27,6 +27,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.util.LinkedList;
+import java.util.List;
 import java.util.zip.Checksum;
 
 import org.apache.commons.logging.Log;
@@ -84,11 +85,18 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
   private Checksum partialCrc = null;
   private DataNode datanode = null;
   volatile private boolean mirrorError;
+  
+  private long offsetInSubblock;
+  
+  private int currNumSubblock;
+  private long numBytesPerSubblock = FSConstants.DEFAULT_SUBBLOCK_SIZE;
 
   // Cache management state
   private boolean dropCacheBehindWrites;
   private boolean syncBehindWrites;
   private long lastCacheDropOffset = 0;
+  
+  private List<FSDataset.BlockWriteStreams> lStreams;
   
   BlockReceiver(Block block, DataInputStream in, String inAddr,
                 String myAddr, boolean isRecovery, String clientName, 
@@ -108,11 +116,22 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
       this.checksumSize = checksum.getChecksumSize();
       this.dropCacheBehindWrites = datanode.shouldDropCacheBehindWrites();
       this.syncBehindWrites = datanode.shouldSyncBehindWrites();
+      
+      this.offsetInSubblock = 0;
+      this.currNumSubblock = 0;
+      this.numBytesPerSubblock = datanode.subblockLength;
       //
       // Open local disk out
       //
-      streams = datanode.data.writeToBlock(block, isRecovery,
+      if (!FSConstants.IS_SUBBLOCK_ON)
+    	  streams = datanode.data.writeToBlock(block, isRecovery,
                               clientName == null || clientName.length() == 0);
+      else 
+      {
+          lStreams = datanode.data.writeToSubblock(block, isRecovery,
+                              clientName == null || clientName.length() == 0);
+          streams = lStreams.get(0);
+      }
       this.finalized = false;
       if (streams != null) {
         this.out = streams.dataOut;
@@ -400,8 +419,8 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
    * returns size of the packet.
    */
   private int receivePacket() throws IOException {
-    
-    int payloadLen = readNextPacket();
+
+	int payloadLen = readNextPacket();
     
     if (payloadLen <= 0) {
       return payloadLen;
@@ -409,8 +428,10 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
     
     buf.mark();
     //read the header
-    buf.getInt(); // packet length
+    int header_packet_length = buf.getInt(); // packet length
     offsetInBlock = buf.getLong(); // get offset of packet in block
+    //currNumSubblock = (int)(offsetInBlock / numBytesPerSubblock);
+    //offsetInSubblock = offsetInBlock % numBytesPerSubblock;
     long seqno = buf.getLong();    // get seqno
     boolean lastPacketInBlock = (buf.get() != 0);
     
@@ -420,13 +441,14 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
     if (LOG.isDebugEnabled()){
       LOG.debug("Receiving one packet for " + block +
                 " of length " + payloadLen +
+                "header_packet_length " + header_packet_length +
                 " seqno " + seqno +
                 " offsetInBlock " + offsetInBlock +
                 " lastPacketInBlock " + lastPacketInBlock);
     }
     
     setBlockPosition(offsetInBlock);
-    
+
     // First write the packet to the mirror:
     if (mirrorOut != null && !mirrorError) {
       try {
@@ -478,6 +500,57 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
       try {
         if (!finalized) {
           //finally write to the disk :
+          if (FSConstants.IS_SUBBLOCK_ON){
+          long readOffsetInPacket = 0;
+          int remainInPacket = len;
+          int readChecksumOff = checksumOff;
+          int readDataOff = dataOff;
+          long remainInSubblock = numBytesPerSubblock - offsetInSubblock;
+          while (remainInSubblock <= remainInPacket) {
+
+        	 if (remainInSubblock % bytesPerChecksum !=0 ) {
+        	   throw new IOException("Data remaining in Subblock does not match");
+        	 }
+             try{
+        	 writeToSubblock(pktBuf, readChecksumOff, readDataOff, 
+        			 ((int)remainInSubblock)/bytesPerChecksum*checksumSize,
+        			 (int)remainInSubblock);}
+             catch(IOException e) {
+            	 LOG.error("writeToSubblock : "+e);
+            	 throw e;
+             }
+
+        	 readChecksumOff += ((int)remainInSubblock)/bytesPerChecksum*checksumSize;
+          	 readDataOff += (int)remainInSubblock;
+          	 remainInPacket -= remainInSubblock;
+          	 remainInSubblock = numBytesPerSubblock;
+          	 offsetInSubblock = numBytesPerSubblock;
+          	 //dropOsCacheBehindWriter(offsetInSubblock);
+          	 currNumSubblock++;
+          	 if (currNumSubblock < lStreams.size())
+          		 try{
+        	 updateWriteStreams(lStreams.get(currNumSubblock)); }
+          	catch(IOException e) {
+           	 LOG.error("updateWriteStreams : "+e);
+           	 throw e;
+            }
+
+          }
+          //System.out.println("=== at write leave end while");
+          if (remainInPacket > 0) {
+        	  writeToSubblock(pktBuf, readChecksumOff, readDataOff, 
+         			 remainInPacket/bytesPerChecksum*checksumSize,
+         			 remainInPacket);
+        	  offsetInSubblock = remainInPacket;
+        	  //dropOsCacheBehindWriter(offsetInSubblock);
+        	  
+          }
+          //System.out.println("=== at write datanode");
+          datanode.data.setVisibleLength(block, offsetInBlock);
+          datanode.myMetrics.incrBytesWritten(len);
+          //System.out.println("=== leave write");
+          }
+          else {
           out.write(pktBuf, dataOff, len);
 
           // If this is a partial chunk, then verify that this is the only
@@ -505,13 +578,14 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
           // update length only after flush to disk
           datanode.data.setVisibleLength(block, offsetInBlock);
           dropOsCacheBehindWriter(offsetInBlock);
+          }
         }
       } catch (IOException iex) {
+    	  //System.out.println("=== receive exception");
         datanode.checkDiskError(iex);
         throw iex;
       }
     }
-
     // put in queue for pending acks
     if (responder != null) {
       ((PacketResponder)responder.getRunnable()).enqueue(seqno,
@@ -523,6 +597,43 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
     }
     
     return payloadLen;
+  }
+  
+  private void writeToSubblock(byte buf[], int sumOff, int dataOff, 
+		                       int sumLen, int dataLen) throws IOException {
+	  out.write(buf, dataOff, dataLen);
+	  checksumOut.write(buf, sumOff, sumLen);
+	  flush();
+  }
+  
+  private void updateWriteStreams(FSDataset.BlockWriteStreams stream) throws IOException {
+	close();
+	streams = stream;
+	if (streams != null) {
+
+        this.out = streams.dataOut;
+        this.cout = streams.checksumOut;
+        if (out instanceof FileOutputStream) {
+          try {
+			this.outFd = ((FileOutputStream) out).getFD();
+		} catch (IOException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+        } else {
+          LOG.warn("Could not get file descriptor for outputstream of class "
+              + out.getClass());
+        }
+        this.checksumOut = new DataOutputStream(new BufferedOutputStream(
+                                                  streams.checksumOut,
+                                                  SMALL_BUFFER_SIZE));
+        // If this block is for appends, then remove it from periodic
+        // validation.
+        //if (datanode.blockScanner != null && isRecovery) {
+        //  datanode.blockScanner.deleteBlock(block);
+        //}
+      
+	}  
   }
 
   private void dropOsCacheBehindWriter(long offsetInBlock) throws IOException {
@@ -568,6 +679,7 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
       if (!finalized) {
         BlockMetadataHeader.writeHeader(checksumOut, checksum);
       }
+      
       if (clientName.length() > 0) {
         responder = new Daemon(datanode.threadGroup, 
                                new PacketResponder(this, block, mirrIn, 
@@ -606,7 +718,12 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
 
         // Finalize the block. Does this fsync()?
         block.setNumBytes(offsetInBlock);
-        datanode.data.finalizeBlock(block);
+        try{
+            datanode.data.finalizeBlock(block);}
+        catch(IOException e) {
+      	  LOG.error("finalizeBlock : exception" + e);
+      	  throw e;
+        }
         datanode.myMetrics.incrBlocksWritten();
       }
 
@@ -688,6 +805,7 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
 
     // set the position of the block file
     datanode.data.setChannelPosition(block, streams, offsetInBlock, offsetInChecksum);
+ 
   }
 
   /**
@@ -719,6 +837,10 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
 
       // open meta file and read in crc value computer earlier
       IOUtils.readFully(instr.checksumIn, crcbuf, 0, crcbuf.length);
+    } catch(IOException e){
+    	LOG.error("instr:"+e);
+    	throw e;
+    	
     } finally {
       IOUtils.closeStream(instr);
     }
@@ -813,7 +935,6 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
       boolean isInterrupted = false;
       final long startTime = ClientTraceLog.isInfoEnabled() ? System.nanoTime() : 0;
       while (running && datanode.shouldRun && !lastPacketInBlock) {
-
         try {
           /**
            * Sequence number -2 is a special value that is used when

@@ -60,6 +60,10 @@ public abstract class TaskStatus implements Writable, Cloneable {
   private Counters counters;
   private boolean includeCounters;
   private SortedRanges.Range nextRecordRange = new SortedRanges.Range();
+  
+  private int numSubtasks = -1;
+  private boolean[] arrSucceedSubtasks = null;
+  private long statusSubtasks = 0;
 
   public TaskStatus() {
     taskid = new TaskAttemptID();
@@ -87,7 +91,57 @@ public abstract class TaskStatus implements Writable, Cloneable {
   public int getNumSlots() {
     return numSlots;
   }
-
+  
+  public void setNumSubtasks(int num) {
+	  this.numSubtasks = num;
+	  //this.statusSubtasks = 0;
+	  arrSucceedSubtasks = new boolean[num];
+	  for (int i=0; i<num; ++i)
+		  arrSucceedSubtasks[i] = false;
+  }
+  
+  public synchronized void setSucceedSubtask(int subtaskId) throws IOException{  
+	   if (subtaskId >= numSubtasks || subtaskId < 0) {
+		   System.out.println("out of range");
+		   throw new IOException("subtaskId out of range");
+	   }
+	   //if (getSubtaskStatus(subtaskId, statusSubtasks)!=-1)
+	   if (arrSucceedSubtasks[subtaskId])
+		   return;
+	   long tmp = 1;
+	   tmp = tmp<<subtaskId;
+	   statusSubtasks = statusSubtasks ^ tmp;
+	   arrSucceedSubtasks[subtaskId] = true;
+   }
+  
+  public boolean checkIfAllSubtaskFinished() {
+	  for (int i=0; i<numSubtasks; ++i) {
+		  if (!arrSucceedSubtasks[i])
+			  return false;
+	  }
+	  return true;
+  }
+  
+  public static boolean getSubtaskStatus(int subtaskId, long statuses) {
+	   long tmp = 1;
+	   tmp = tmp << subtaskId;
+	   tmp = tmp & statuses;
+	   return tmp == 0 ? false:true;
+   }
+   
+  
+  public synchronized long getStatusSubtasks() {
+	  return this.statusSubtasks;
+  }
+  
+  public synchronized int getNumSubtasks() {
+	  return this.numSubtasks;
+  }
+  
+  public synchronized void setStatusSubtasks(long statuses) {
+	  this.statusSubtasks = statusSubtasks | statuses;
+  }
+  
   public float getProgress() { return progress; }
   public void setProgress(float progress) { this.progress = progress; } 
   public State getRunState() { return runState; }
@@ -320,6 +374,15 @@ public abstract class TaskStatus implements Writable, Cloneable {
     this.runState = status.getRunState();
     this.stateString = status.getStateString();
     this.nextRecordRange = status.getNextRecordRange();
+    
+    if (MRConstants.IS_SUBTASK_OUTPUT_ON && status.getIsMap()) {
+    	this.numSubtasks = status.getNumSubtasks();
+    	//if (numSubtasks > 0)
+    	//System.out.println("taskStatus-statusUpdate: newstatusSubtasks="+status.getStatusSubtasks()
+    	//		+"oldstatusSubtasks="+this.statusSubtasks);
+    		setStatusSubtasks(status.getStatusSubtasks());
+    		
+    }
 
     setDiagnosticInfo(status.getDiagnosticInfo());
     
@@ -360,6 +423,23 @@ public abstract class TaskStatus implements Writable, Cloneable {
       setFinishTime(finishTime); 
     }
   }
+  
+  synchronized void statusUpdate(State runState, 
+          float progress,
+          String state, 
+          Phase phase,
+          long finishTime, int numSubtasks, long statusSubtasks) {
+    setRunState(runState);
+    setProgress(progress);
+    setStateString(state);
+    setPhase(phase);
+    if (finishTime > 0) {
+      setFinishTime(finishTime); 
+    }
+    this.numSubtasks = numSubtasks;
+    //if (numSubtasks > 0)
+    setStatusSubtasks(statusSubtasks);
+  }
 
   /**
    * Clear out transient information after sending out a status-update
@@ -399,6 +479,15 @@ public abstract class TaskStatus implements Writable, Cloneable {
     if (includeCounters) {
       counters.write(out);
     }
+    if (MRConstants.IS_SUBTASK_OUTPUT_ON) {
+    	out.writeInt(numSubtasks);
+    	if (numSubtasks > 0){
+    		//if (statusSubtasks != 0)
+    	//System.out.println("taskstatus.write: taskid="+taskid+"numSubtasks="+numSubtasks+
+    	//		",statusSubtasks="+statusSubtasks);
+    		out.writeLong(statusSubtasks);
+    	}
+    }
     nextRecordRange.write(out);
   }
 
@@ -417,6 +506,16 @@ public abstract class TaskStatus implements Writable, Cloneable {
     this.outputSize = in.readLong();
     if (includeCounters) {
       counters.readFields(in);
+    }
+    if (MRConstants.IS_SUBTASK_OUTPUT_ON) {
+    	
+      this.numSubtasks = in.readInt();
+      if (numSubtasks > 0) {
+    	  this.statusSubtasks = in.readLong();	
+    	  //if (statusSubtasks != 0)
+    	  //System.out.println("taskstatus.readfields: taskid="+taskid+",numSubtasks="+numSubtasks+
+      		//	",statusSubtasks="+statusSubtasks);
+      }
     }
     nextRecordRange.readFields(in);
   }

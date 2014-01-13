@@ -67,6 +67,10 @@ public class FileOutputCommitter extends OutputCommitter {
                           (FileOutputCommitter.TEMP_DIR_NAME + Path.SEPARATOR +
                            "_" + context.getTaskAttemptID().toString()
                            )).makeQualified(outputFileSystem);
+      //System.out.println("FileOutputCommitter construct: outputpath="+outputPath+
+    	//	  ",workPath="+workPath+
+    	//	  ",outputFilesystem="+outputFileSystem.getUri()+
+    	//	  ",ismap="+context.getTaskAttemptID());
     }
   }
 
@@ -205,6 +209,8 @@ public class FileOutputCommitter extends OutputCommitter {
         }
       }
       LOG.debug("Moved " + taskOutput + " to " + finalOutputPath);
+      //System.out.println("Moved " + taskOutput + " to " + finalOutputPath+
+    	//	  ", taskid="+context.getTaskAttemptID());
     } else if(fs.getFileStatus(taskOutput).isDir()) {
       FileStatus[] paths = fs.listStatus(taskOutput);
       Path finalOutputPath = getFinalPath(jobOutputDir, taskOutput, workPath);
@@ -264,6 +270,7 @@ public class FileOutputCommitter extends OutputCommitter {
   public boolean needsTaskCommit(TaskAttemptContext context
                                  ) throws IOException {
     return workPath != null && outputFileSystem.exists(workPath);
+    //file:/home/liming/hadoop/hadoop-1.2.1/testing/mt/output/_temporary/_attempt_local163139749_0001_m_000000_0
   }
 
   /**

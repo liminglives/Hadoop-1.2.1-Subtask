@@ -56,7 +56,13 @@ class MapOutputFile {
     return lDirAlloc.getLocalPathToRead(TaskTracker.OUTPUT + Path.SEPARATOR
         + "file.out", conf);
   }
-
+  
+  public Path getSubtaskOutputFile(int subtaskId)
+      throws IOException {
+    return lDirAlloc.getLocalPathToRead(TaskTracker.OUTPUT + Path.SEPARATOR
+        + subtaskId + "file.out", conf);
+  }
+  
   /**
    * Create a local map output file name.
    * 
@@ -68,8 +74,14 @@ class MapOutputFile {
       throws IOException {
     return lDirAlloc.getLocalPathForWrite(TaskTracker.OUTPUT + Path.SEPARATOR
         + "file.out", size, conf);
+  } 
+  
+  public Path getSubtaskOutputFileForWrite(long size, int subtaskId)
+      throws IOException {
+    return lDirAlloc.getLocalPathForWrite(TaskTracker.OUTPUT + Path.SEPARATOR
+        + subtaskId + "file.out", size, conf);
   }
-
+  
   /**
    * Return the path to a local map output index file created earlier
    * 
@@ -81,7 +93,13 @@ class MapOutputFile {
     return lDirAlloc.getLocalPathToRead(TaskTracker.OUTPUT + Path.SEPARATOR
         + "file.out.index", conf);
   }
-
+  
+  public Path getSubtaskOutputIndexFile(int subtaskId)
+      throws IOException {
+    return lDirAlloc.getLocalPathToRead(TaskTracker.OUTPUT + Path.SEPARATOR
+        + subtaskId + "file.out.index", conf);
+  }
+  
   /**
    * Create a local map output index file name.
    * 
@@ -94,7 +112,13 @@ class MapOutputFile {
     return lDirAlloc.getLocalPathForWrite(TaskTracker.OUTPUT + Path.SEPARATOR
         + "file.out.index", size, conf);
   }
-
+  
+  public Path getSubtaskOutputIndexFileForWrite(long size, int subtaskId)
+      throws IOException {
+    return lDirAlloc.getLocalPathForWrite(TaskTracker.OUTPUT + Path.SEPARATOR
+        + subtaskId + "file.out.index", size, conf);
+  }
+  
   /**
    * Return a local map spill file created earlier.
    * 
@@ -107,7 +131,12 @@ class MapOutputFile {
     return lDirAlloc.getLocalPathToRead(TaskTracker.OUTPUT + "/spill"
         + spillNumber + ".out", conf);
   }
-
+  
+  public Path getSubtaskSpillFile(int spillNumber, int subtaskId)
+      throws IOException {
+    return lDirAlloc.getLocalPathToRead(TaskTracker.OUTPUT + "/" + subtaskId 
+    		+ "spill" + spillNumber + ".out", conf);
+  }
   /**
    * Create a local map spill file name.
    * 
@@ -120,6 +149,12 @@ class MapOutputFile {
       throws IOException {
     return lDirAlloc.getLocalPathForWrite(TaskTracker.OUTPUT + "/spill"
         + spillNumber + ".out", size, conf);
+  }
+  
+  public Path getSubtaskSpillFileForWrite(int spillNumber, long size, 
+		  int subtaskId) throws IOException {
+    return lDirAlloc.getLocalPathForWrite(TaskTracker.OUTPUT + "/" + subtaskId 
+    		+ "spill" + spillNumber + ".out", size, conf);
   }
 
   /**
@@ -134,6 +169,12 @@ class MapOutputFile {
     return lDirAlloc.getLocalPathToRead(TaskTracker.OUTPUT + "/spill"
         + spillNumber + ".out.index", conf);
   }
+  
+  public Path getSubtaskSpillIndexFile(int spillNumber, int subtaskId)
+      throws IOException {
+   return lDirAlloc.getLocalPathToRead(TaskTracker.OUTPUT + "/" + subtaskId 
+		   + "spill" + spillNumber + ".out.index", conf);
+}
 
   /**
    * Create a local map spill index file name.
@@ -148,6 +189,12 @@ class MapOutputFile {
     return lDirAlloc.getLocalPathForWrite(TaskTracker.OUTPUT + "/spill"
         + spillNumber + ".out.index", size, conf);
   }
+  
+  public Path getSubtaskSpillIndexFileForWrite(int spillNumber, long size, 
+		  int subtaskId) throws IOException {
+    return lDirAlloc.getLocalPathForWrite(TaskTracker.OUTPUT + "/" + subtaskId
+    		+ "spill" + spillNumber + ".out.index", size, conf);
+}
 
   /**
    * Return a local reduce input file created earlier

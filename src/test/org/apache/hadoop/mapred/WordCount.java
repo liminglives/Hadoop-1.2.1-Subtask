@@ -18,7 +18,10 @@
 
 package org.apache.hadoop.mapred;
 
+import java.io.BufferedReader;
+import java.io.DataOutputStream;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
@@ -26,6 +29,8 @@ import java.util.StringTokenizer;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.LongWritable;
@@ -39,6 +44,7 @@ import org.apache.hadoop.mapred.Mapper;
 import org.apache.hadoop.mapred.OutputCollector;
 import org.apache.hadoop.mapred.Reducer;
 import org.apache.hadoop.mapred.Reporter;
+import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
 
@@ -108,6 +114,29 @@ public class WordCount extends Configured implements Tool {
   public int run(String[] args) throws Exception {
     JobConf conf = new JobConf(getConf(), WordCount.class);
     conf.setJobName("wordcount");
+    
+    Path inDir = new Path("testing/mt/input");
+    Path outDir = new Path("testing/mt/output");
+
+    System.out.println("inDir:"+inDir);
+
+    //JobConf conf = createJobConf();
+    //Configuration conf = new Configuration();
+    
+    FileSystem inFs = inDir.getFileSystem(conf);
+    FileSystem outFs = outDir.getFileSystem(conf);
+    
+    outFs.delete(outDir, true);
+    if (!inFs.mkdirs(inDir)) {
+      throw new IOException("Mkdirs failed to create " + inDir.toString());
+    }
+    {
+      DataOutputStream file = inFs.create(new Path(inDir, "part-0"));
+      for (int i=0; i<10000; ++i)
+        file.writeBytes("a b ad\nb\n\nc\nd\ne\nba b ad\nb\n");
+      file.close();
+    }
+    System.out.println("inFs:"+inFs);
  
     // the keys are words (strings)
     conf.setOutputKeyClass(Text.class);
@@ -118,6 +147,11 @@ public class WordCount extends Configured implements Tool {
     conf.setCombinerClass(Reduce.class);
     conf.setReducerClass(Reduce.class);
     
+    conf.setNumMapTasks(1);
+    conf.setNumReduceTasks(1);
+    conf.setBoolean(MRConstants.SUBTASK_ON, false);
+    conf.setBoolean(MRConstants.SUBTASK_OUTPUT_ON, false);
+    /*
     List<String> other_args = new ArrayList<String>();
     for(int i=0; i < args.length; ++i) {
       try {
@@ -142,13 +176,43 @@ public class WordCount extends Configured implements Tool {
       System.out.println("ERROR: Wrong number of parameters: " +
                          other_args.size() + " instead of 2.");
       return printUsage();
-    }
-    FileInputFormat.setInputPaths(conf, other_args.get(0));
-    FileOutputFormat.setOutputPath(conf, new Path(other_args.get(1)));
+    } */
+    
+    FileInputFormat.setInputPaths(conf, inDir);//other_args.get(0));
+    FileOutputFormat.setOutputPath(conf, outDir);//new Path(other_args.get(1)));
         
     JobClient.runJob(conf);
+    System.out.println("job completed");
+    String result;
+    result = readOutput(outDir, conf);
+    System.out.println("result:\n" + result);
     return 0;
   }
+  
+  public static String readOutput(Path outDir, 
+          Configuration conf) throws IOException {
+    FileSystem fs = outDir.getFileSystem(conf);
+    StringBuffer result = new StringBuffer();
+    {
+
+    Path[] fileList = FileUtil.stat2Paths(fs.listStatus(outDir,
+    new Utils.OutputFileUtils.OutputFilesFilter()));
+
+    for(int i=0; i < fileList.length; ++i) {
+    System.out.println("File list[" + i + "]" + ": "+ fileList[i]);
+    BufferedReader file = 
+    new BufferedReader(new InputStreamReader(fs.open(fileList[i])));
+    String line = file.readLine();
+    while (line != null) {
+      result.append(line);
+      result.append("\n");
+      line = file.readLine();
+      }
+    file.close();
+    }
+  }
+  return result.toString();
+ }
   
   
   public static void main(String[] args) throws Exception {

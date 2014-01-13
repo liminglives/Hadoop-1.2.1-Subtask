@@ -107,6 +107,8 @@ class ReduceTask extends Task {
   private static final Log LOG = LogFactory.getLog(ReduceTask.class.getName());
   private int numMaps;
   private ReduceCopier reduceCopier;
+  private int numSubMaps;
+  private int numNeedFetchMapOutput;
 
   private CompressionCodec codec;
 
@@ -161,7 +163,15 @@ class ReduceTask extends Task {
                     int partition, int numMaps, int numSlotsRequired) {
     super(jobFile, taskId, partition, numSlotsRequired);
     this.numMaps = numMaps;
+    this.numNeedFetchMapOutput = numMaps;
   }
+  
+  public ReduceTask(String jobFile, TaskAttemptID taskId,
+          int partition, int numMaps, int numSlotsRequired, int numsubmaps) {
+    this(jobFile, taskId, partition, numMaps, numSlotsRequired);
+    this.numSubMaps = numsubmaps;
+    this.numNeedFetchMapOutput = numsubmaps;
+}
   
   private CompressionCodec initCodec() {
     // check if map-outputs are to be compressed
@@ -186,7 +196,7 @@ class ReduceTask extends Task {
     return false;
   }
 
-  public int getNumMaps() { return numMaps; }
+  public int getNumMaps() { return numNeedFetchMapOutput/*numMaps*/; }
   
   /**
    * Localize the given JobConf to be specific for this task.
@@ -202,6 +212,8 @@ class ReduceTask extends Task {
     super.write(out);
 
     out.writeInt(numMaps);                        // write the number of maps
+    if (MRConstants.IS_SUBTASK_OUTPUT_ON)
+    	out.writeInt(numSubMaps);
   }
 
   @Override
@@ -209,6 +221,8 @@ class ReduceTask extends Task {
     super.readFields(in);
 
     numMaps = in.readInt();
+    if (MRConstants.IS_SUBTASK_OUTPUT_ON)
+      numSubMaps = in.readInt();
   }
   
   // Get the input files for the reducer.
@@ -217,7 +231,7 @@ class ReduceTask extends Task {
     List<Path> fileList = new ArrayList<Path>();
     if (isLocal) {
       // for local jobs
-      for(int i = 0; i < numMaps; ++i) {
+      for(int i = 0; i < numNeedFetchMapOutput/*numMaps*/; ++i) {
         fileList.add(mapOutputFile.getInputFile(i));
       }
     } else {
@@ -362,6 +376,9 @@ class ReduceTask extends Task {
     reporter.startCommunicationThread();
     boolean useNewApi = job.getUseNewReducer();
     initialize(job, getJobID(), reporter, useNewApi);
+    
+    isSubtaskOutputOn = job.getBoolean(MRConstants.SUBTASK_OUTPUT_ON, 
+    		MRConstants.IS_SUBTASK_OUTPUT_ON);
 
     // check if it is a cleanupJobTask
     if (jobCleanup) {
@@ -379,6 +396,17 @@ class ReduceTask extends Task {
     
     // Initialize the codec
     codec = initCodec();
+    if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/) {
+      System.out.println("reducetask-run: numSubMaps="+numSubMaps);
+      numSubMaps = job.getNumMapSubTasks();
+      System.out.println("reducetask-run: job.getNumMapSubTasks()="+numSubMaps);
+      if (numSubMaps <=0 ) {
+    	throw new IOException("reducetask-run: job.getNumMapSubTasks()="+numSubMaps);
+      }
+    }
+    numNeedFetchMapOutput = isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/ ? numSubMaps : numMaps;
+    
+    	
 
     boolean isLocal = "local".equals(job.get("mapred.job.tracker", "local"));
     if (!isLocal) {
@@ -789,6 +817,9 @@ class ReduceTask extends Task {
     private Set <TaskID> copiedMapOutputs = 
       Collections.synchronizedSet(new TreeSet<TaskID>());
     
+    private Set <SubTaskID> copiedSubMapOutputs = 
+        Collections.synchronizedSet(new TreeSet<SubTaskID>());
+    
     /** 
      * The set of obsolete map taskids.
      */
@@ -1008,6 +1039,7 @@ class ReduceTask extends Task {
       TaskID taskId;
       String ttHost;
       URL taskOutput;
+      SubTaskID subtaskId;
       
       public MapOutputLocation(TaskAttemptID taskAttemptId, 
                                String ttHost, URL taskOutput) {
@@ -1015,6 +1047,19 @@ class ReduceTask extends Task {
         this.taskId = this.taskAttemptId.getTaskID();
         this.ttHost = ttHost;
         this.taskOutput = taskOutput;
+      }
+      
+      public MapOutputLocation(SubTaskID subtaskId,
+    		                   String ttHost, URL taskOutput) {
+        this.subtaskId = subtaskId;
+        this.taskAttemptId = this.subtaskId.getTaskAttemptID();
+        this.taskId = this.taskAttemptId.getTaskID();
+        this.ttHost = ttHost;
+        this.taskOutput = taskOutput;
+      }
+      
+      public SubTaskID getSubTaskId() {
+    	  return subtaskId;
       }
       
       public TaskAttemptID getTaskAttemptId() {
@@ -1380,6 +1425,13 @@ class ReduceTask extends Task {
       private long copyOutput(MapOutputLocation loc
                               ) throws IOException, InterruptedException {
         // check if we still need to copy the output from this location
+    	if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/) {
+    		if (copiedSubMapOutputs.contains(loc.getSubTaskId()) || 
+    	            obsoleteMapIds.contains(loc.getTaskAttemptId())) {
+    			return CopyResult.OBSOLETE;
+    		}
+    	}
+    	else
         if (copiedMapOutputs.contains(loc.getTaskId()) || 
             obsoleteMapIds.contains(loc.getTaskAttemptId())) {
           return CopyResult.OBSOLETE;
@@ -1411,6 +1463,13 @@ class ReduceTask extends Task {
         
         // lock the ReduceTask while we do the rename
         synchronized (ReduceTask.this) {
+          if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/) {
+        	  if (copiedSubMapOutputs.contains(loc.getSubTaskId())) {
+        		mapOutput.discard();
+                return CopyResult.OBSOLETE;
+        	  }
+          }
+          else
           if (copiedMapOutputs.contains(loc.getTaskId())) {
             mapOutput.discard();
             return CopyResult.OBSOLETE;
@@ -1455,6 +1514,9 @@ class ReduceTask extends Task {
           }
 
           // Note that we successfully copied the map-output
+          if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/)
+        	  noteCopiedSubMapOutput(loc.getSubTaskId());
+          else
           noteCopiedMapOutput(loc.getTaskId());
         }
         
@@ -1469,7 +1531,12 @@ class ReduceTask extends Task {
        */
       private void noteCopiedMapOutput(TaskID taskId) {
         copiedMapOutputs.add(taskId);
-        ramManager.setNumCopiedMapOutputs(numMaps - copiedMapOutputs.size());
+        ramManager.setNumCopiedMapOutputs(numNeedFetchMapOutput/*numMaps*/ - copiedMapOutputs.size());
+      }
+      
+      private void noteCopiedSubMapOutput(SubTaskID subtaskId) {
+    	copiedSubMapOutputs.add(subtaskId);
+        ramManager.setNumCopiedMapOutputs(numNeedFetchMapOutput/*numMaps*/ - copiedSubMapOutputs.size());
       }
 
       /**
@@ -1502,19 +1569,33 @@ class ReduceTask extends Task {
  
         // Validate header from map output
         TaskAttemptID mapId = null;
+        int subtaskid = -1;
         try {
           mapId =
             TaskAttemptID.forName(connection.getHeaderField(FROM_MAP_TASK));
+          if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/)
+            subtaskid = Integer.parseInt(connection.getHeaderField(FROM_MAP_SUBTASK));
         } catch (IllegalArgumentException ia) {
           LOG.warn("Invalid map id ", ia);
           return null;
         }
         TaskAttemptID expectedMapId = mapOutputLoc.getTaskAttemptId();
+        int expectedSubtaskId = -2;
+        if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/)
+          expectedSubtaskId = mapOutputLoc.getSubTaskId().getId();
         if (!mapId.equals(expectedMapId)) {
           LOG.warn("data from wrong map:" + mapId +
               " arrived to reduce task " + reduce +
               ", where as expected map output should be from " + expectedMapId);
           return null;
+        }
+        if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/ && expectedSubtaskId!=subtaskid) {
+          LOG.warn("data from map:" + mapId +
+        		   ", wrong subtaskid:" + subtaskid +
+                    " arrived to reduce task " + reduce +
+                    ", where as expected subtask map output should be from " + expectedSubtaskId);
+          return null;
+        	
         }
         
         long decompressedLength = 
@@ -1938,7 +2019,7 @@ class ReduceTask extends Task {
 
       this.scheduledCopies = new ArrayList<MapOutputLocation>(100);
       this.copyResults = new ArrayList<CopyResult>(100);    
-      this.numCopiers = conf.getInt("mapred.reduce.parallel.copies", 5);
+      this.numCopiers = conf.getInt("mapred.reduce.parallel.copies", 10/*5*/);
       this.maxInFlight = 4 * numCopiers;
       Counters.Counter combineInputCounter = 
         reporter.getCounter(Task.Counter.COMBINE_INPUT_RECORDS);
@@ -1952,12 +2033,14 @@ class ReduceTask extends Task {
       
       this.ioSortFactor = conf.getInt("io.sort.factor", 10);
       
-      this.abortFailureLimit = Math.max(30, numMaps / 10);
+
+      this.abortFailureLimit = Math.max(30, numNeedFetchMapOutput/*numMaps*/ / 10);
+     
 
       this.maxFetchFailuresBeforeReporting = conf.getInt(
           "mapreduce.reduce.shuffle.maxfetchfailures", REPORT_FAILURE_LIMIT);
 
-      this.maxFailedUniqueFetches = Math.min(numMaps, 
+      this.maxFailedUniqueFetches = Math.min(numNeedFetchMapOutput/*numMaps*/, 
                                              this.maxFailedUniqueFetches);
       this.maxInMemOutputs = conf.getInt("mapred.inmem.merge.threshold", 1000);
       this.maxInMemCopyPer =
@@ -2010,9 +2093,10 @@ class ReduceTask extends Task {
       InMemFSMergeThread inMemFSMergeThread = null;
       GetMapEventsThread getMapEventsThread = null;
       
-      for (int i = 0; i < numMaps; i++) {
+      for (int i = 0; i < numNeedFetchMapOutput/*numMaps*/; i++) {
         copyPhase.addPhase();       // add sub-phase per file
       }
+       
       
       copiers = new ArrayList<MapOutputCopier>(numCopiers);
       
@@ -2042,7 +2126,8 @@ class ReduceTask extends Task {
       long lastOutputTime = 0;
       
         // loop until we get all required outputs
-        while (copiedMapOutputs.size() < numMaps && mergeThrowable == null) {
+        while ((isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/ ? copiedSubMapOutputs.size() : copiedMapOutputs.size()) < numNeedFetchMapOutput/*numMaps*/ && 
+        		mergeThrowable == null) {
           int numEventsAtStartOfScheduling;
           synchronized (copyResultsOrNewEventsLock) {
             numEventsAtStartOfScheduling = numEventsFetched;
@@ -2056,7 +2141,8 @@ class ReduceTask extends Task {
           }
           if (logNow) {
             LOG.info(reduceTask.getTaskID() + " Need another " 
-                   + (numMaps - copiedMapOutputs.size()) + " map output(s) "
+                   + (numNeedFetchMapOutput/*numMaps*/ - (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/ ? copiedSubMapOutputs.size() : copiedMapOutputs.size())) 
+                   + " map output(s) "
                    + "where " + numInFlight + " is already in progress");
           }
 
@@ -2223,7 +2309,7 @@ class ReduceTask extends Task {
               float transferRate = mbs/secsSinceStart;
                 
               copyPhase.startNextPhase();
-              copyPhase.setStatus("copy (" + numCopied + " of " + numMaps 
+              copyPhase.setStatus("copy (" + numCopied + " of " + numNeedFetchMapOutput/*numMaps*/ 
                                   + " at " +
                                   mbpsFormat.format(transferRate) +  " MB/s)");
                 
@@ -2279,7 +2365,7 @@ class ReduceTask extends Task {
                 
                 // check if the reducer has progressed enough
                 boolean reducerProgressedEnough = 
-                    (((float)numCopied / numMaps) 
+                    (((float)numCopied / /*numMaps*/numNeedFetchMapOutput) 
                      >= MIN_REQUIRED_PROGRESS_PERCENT);
                 
                 // check if the reducer is stalled for a long time
@@ -2300,7 +2386,7 @@ class ReduceTask extends Task {
                 
                 // kill if not healthy and has insufficient progress
                 if ((fetchFailedMaps.size() >= maxFailedUniqueFetches ||
-                     fetchFailedMaps.size() == (numMaps - copiedMapOutputs.size()))
+                     fetchFailedMaps.size() == (numNeedFetchMapOutput/*numMaps*/ - (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/ ? copiedSubMapOutputs.size() : copiedMapOutputs.size())))
                     && !reducerHealthy 
                     && (!reducerProgressedEnough || reducerStalled)) { 
                   LOG.fatal("Shuffle failed with too many fetch failures " + 
@@ -2377,7 +2463,8 @@ class ReduceTask extends Task {
             return false;
           }
         }
-        return mergeThrowable == null && copiedMapOutputs.size() == numMaps;
+        return mergeThrowable == null && 
+          (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/ ? copiedSubMapOutputs.size() : copiedMapOutputs.size()) == numNeedFetchMapOutput/*numMaps*/;
     }
     
     // Notify the JobTracker
@@ -2936,9 +3023,13 @@ class ReduceTask extends Task {
         //    outputs at all.
         for (TaskCompletionEvent event : events) {
           switch (event.getTaskStatus()) {
+            case RUNNING:
             case SUCCEEDED:
             {
               URI u = URI.create(event.getTaskTrackerHttp());
+              //System.out.println("reducetask-getMapCompletionEvents: " +
+              //		"tasktrackerhttp="+event.getTaskTrackerHttp()+
+            	//	  ", uri="+u+", status="+event.getTaskStatus());
               String host = u.getHost();
               if (host == null) {
                 throw new IOException("Invalid hostname found in tracker" +
@@ -2947,10 +3038,42 @@ class ReduceTask extends Task {
                    "'");
               }
               TaskAttemptID taskId = event.getTaskAttemptId();
-              URL mapOutputLocation = new URL(event.getTaskTrackerHttp() + 
+              URL mapOutputLocation;
+              if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/) {
+            	  long subtasksCompletion = event.getSubtasksCompletion();
+            	  System.out.println("reducetask-getMapCompletionEvents: subtasksCompletion="+
+            			  subtasksCompletion+", status="+event.getTaskStatus());
+            	  if ((subtasksCompletion ) == 0)
+            	    continue;
+            	  for (int i=0; i<MRConstants.MAX_NUM_SUBTASKS; ++i) {
+            		//int subtaskId = TaskStatus.getSubtaskStatus(i, subtasksCompletion);
+            		if (TaskStatus.getSubtaskStatus(i, subtasksCompletion)) {
+            	      mapOutputLocation = new URL(event.getTaskTrackerHttp() + 
+                          "/mapOutput?job=" + taskId.getJobID() +
+                          "&map=" + taskId + 
+                          "&reduce=" + getPartition() +
+                          "&subtask=" + i);
+            	      
+            	      System.out.println("reducetask-getMapCompletionEvents----: mapOutputLocation="+mapOutputLocation);
+                      List<MapOutputLocation> loc = mapLocations.get(host);
+                      if (loc == null) {
+                        loc = Collections.synchronizedList
+                          (new LinkedList<MapOutputLocation>());
+                        mapLocations.put(host, loc);
+                       }
+                      loc.add(new MapOutputLocation(new SubTaskID(taskId, i), host, mapOutputLocation));
+                      numNewMaps ++;
+            	      
+            		}
+            		
+            	  }
+              } 
+              else {
+              mapOutputLocation = new URL(event.getTaskTrackerHttp() + 
                                       "/mapOutput?job=" + taskId.getJobID() +
                                       "&map=" + taskId + 
                                       "&reduce=" + getPartition());
+              System.out.println("reducetask-getMapCompletionEvents: mapOutputLocation="+mapOutputLocation);
               List<MapOutputLocation> loc = mapLocations.get(host);
               if (loc == null) {
                 loc = Collections.synchronizedList
@@ -2959,6 +3082,7 @@ class ReduceTask extends Task {
                }
               loc.add(new MapOutputLocation(taskId, host, mapOutputLocation));
               numNewMaps ++;
+              }
             }
             break;
             case FAILED:
@@ -2972,6 +3096,15 @@ class ReduceTask extends Task {
             break;
             case TIPFAILED:
             {
+              if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/) {
+            	  long cmp = event.getSubtasksCompletion();
+            	  if (cmp !=0) {
+            		for (int i=0; i<MRConstants.MAX_NUM_SUBTASKS; ++i) {
+            	      if (TaskStatus.getSubtaskStatus(i, cmp))
+            	        copiedSubMapOutputs.add(new SubTaskID(event.getTaskAttemptId(), i));
+            		}
+            	  }
+              }else
               copiedMapOutputs.add(event.getTaskAttemptId().getTaskID());
               LOG.info("Ignoring output of failed map TIP: '" +  
                    event.getTaskAttemptId() + "'");

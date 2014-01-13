@@ -24,6 +24,7 @@ import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.List;
 
 
 
@@ -138,6 +139,11 @@ public interface FSDatasetInterface extends FSDatasetMBean {
    */
   public InputStream getBlockInputStream(Block b, long seekOffset)
             throws IOException;
+  
+  public InputStream getSubblockInputStream(Block b, long seekOffset)
+            throws IOException;
+  public long getVisibleSubblockLength(Block b, long seekOffset) 
+            throws IOException;
 
   /**
    * Returns an input stream at specified offset of the specified block
@@ -200,6 +206,9 @@ public interface FSDatasetInterface extends FSDatasetMBean {
   public BlockWriteStreams writeToBlock(Block b, boolean isRecovery, 
                                         boolean isReplicationRequest) throws IOException;
 
+  public List<BlockWriteStreams> writeToSubblock(Block b, boolean isRecovery,
+          boolean replicationRequest) throws IOException;
+  
   /**
    * Update the block to the new generation stamp and length.  
    */

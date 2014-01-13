@@ -1192,6 +1192,9 @@ public class JobConf extends Configuration {
    * @see FileStatus#getBlockSize()
    */
   public void setNumMapTasks(int n) { setInt("mapred.map.tasks", n); }
+  
+  public void setNumMapSubTasks(int n) { setInt("mapred.map.subtasks", n); }
+  public int getNumMapSubTasks() { return getInt("mapred.map.subtasks", -1); }
 
   /**
    * Get configured the number of reduce tasks for this job. Defaults to 

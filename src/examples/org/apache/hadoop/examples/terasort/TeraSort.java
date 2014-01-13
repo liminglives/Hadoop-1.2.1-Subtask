@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.io.PrintStream;
 import java.net.URI;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
 
 import org.apache.commons.logging.Log;
@@ -245,8 +246,13 @@ public class TeraSort extends Configured implements Tool {
     DistributedCache.createSymlink(job);
     job.setInt("dfs.replication", 1);
     TeraOutputFormat.setFinalSync(job, true);
+    Date startTime = new Date();
     JobClient.runJob(job);
     LOG.info("done");
+    Date end_time = new Date();
+    System.out.println("The job took " + 
+            (end_time.getTime() - startTime.getTime()) /1000 + " seconds.");
+    
     return 0;
   }
 

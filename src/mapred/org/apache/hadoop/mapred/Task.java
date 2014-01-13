@@ -165,6 +165,8 @@ abstract public class Task implements Writable, Configurable {
   protected TaskUmbilicalProtocol umbilical;
   protected SecretKey tokenSecret;
   protected JvmContext jvmContext;
+  
+  protected boolean isSubtaskOutputOn; 
 
   ////////////////////////////////////////////
   // Constructors
@@ -511,18 +513,19 @@ abstract public class Task implements Writable, Configurable {
         LOG.debug("using new api for output committer");
       }
       outputFormat =
-        ReflectionUtils.newInstance(taskContext.getOutputFormatClass(), job);
+        ReflectionUtils.newInstance(taskContext.getOutputFormatClass(), job); 
       committer = outputFormat.getOutputCommitter(taskContext);
     } else {
       committer = conf.getOutputCommitter();
     }
-    Path outputPath = FileOutputFormat.getOutputPath(conf);
+    Path outputPath = FileOutputFormat.getOutputPath(conf);  //testing/mt/output
+    System.out.println("Task-initialize(): outputPath="+outputPath+",isMaptask="+isMapTask());
     if (outputPath != null) {
       if ((committer instanceof FileOutputCommitter)) {
         FileOutputFormat.setWorkOutputPath(conf, 
           ((FileOutputCommitter)committer).getTempTaskOutputPath(taskContext));
       } else {
-        FileOutputFormat.setWorkOutputPath(conf, outputPath);
+        FileOutputFormat.setWorkOutputPath(conf, outputPath); //file:/home/..../hadoop-1.2.1/testing/....
       }
     }
     committer.setupTask(taskContext);
@@ -550,6 +553,9 @@ abstract public class Task implements Writable, Configurable {
     private boolean done = true;
     private Object lock = new Object();
     
+    private int numSubtask = -1;
+	private float[] subtasksProgress;
+    
     /**
      * flag that indicates whether progress update needs to be sent to parent.
      * If true, it has been set. If false, it has been reset. 
@@ -563,6 +569,31 @@ abstract public class Task implements Writable, Configurable {
       this.taskProgress = taskProgress;
       this.jvmContext = jvmContext;
     }
+    
+    public void setNumSubtask(int num) {
+    	this.numSubtask = num;
+    	subtasksProgress = new float[numSubtask];
+    	for (int i=0; i<numSubtask; ++i)
+    		subtasksProgress[i] = 0.0f;
+    }
+    
+    public synchronized void setProgress(float progress, int subtaskId) {
+		if (subtaskId<0 || numSubtask<0)
+			setProgress(progress);
+		else {
+			subtasksProgress[subtaskId] += progress;
+			setProgress(calcArgProgress(subtasksProgress));
+		}
+	}
+    
+    private float calcArgProgress(float[] progresses) {
+		float sum = 0;
+		for (int i=0; i<numSubtask; ++i)
+			sum += progresses[i];
+		
+		return sum / numSubtask;
+	}
+    
     // getters and setters for flag
     void setProgressFlag() {
       progressFlag.set(true);
@@ -664,10 +695,10 @@ abstract public class Task implements Writable, Configurable {
             }
           } 
           catch (InterruptedException e) {
-            if (LOG.isDebugEnabled()) {
-              LOG.debug(getTaskID() + " Progress/ping thread exiting " +
+            //if (LOG.isDebugEnabled()) {
+              LOG.info(getTaskID() + " Progress/ping thread exiting " +
                 "since it got interrupted");
-            }
+            //}
             break;
           }
 
@@ -860,6 +891,8 @@ abstract public class Task implements Writable, Configurable {
     updateCounters();
 
     boolean commitRequired = isCommitRequired();
+    //System.out.println("task-done(): commitrequired="+commitRequired+
+    //		", taskid="+taskId);
     if (commitRequired) {
       int retries = MAX_RETRIES;
       setState(TaskStatus.State.COMMIT_PENDING);
@@ -902,6 +935,30 @@ abstract public class Task implements Writable, Configurable {
       commitRequired = committer.needsTaskCommit(taskContext);
     }
     return commitRequired;
+  }
+  
+  public synchronized void sendSubtaskFinishedStatus(TaskUmbilicalProtocol umbilical)
+  throws IOException {
+	    int retries = 4;
+	    while (true) {
+	      try {
+	    	  //System.out.println("getStatusSubtasks="+taskStatus.getStatusSubtasks());
+	        if (!umbilical.statusUpdate(getTaskID(), taskStatus, jvmContext)) {
+	          LOG.warn("Parent died.  Exiting "+taskId);
+	          System.exit(66);
+	        }
+	        taskStatus.clearStatus();
+	        return;
+	      } catch (InterruptedException ie) {
+	        Thread.currentThread().interrupt(); // interrupt ourself
+	      } catch (IOException ie) {
+	        LOG.warn("Failure sending status update: " + 
+	                  StringUtils.stringifyException(ie));
+	        if (--retries == 0) {
+	          throw ie;
+	        }
+	      }
+	    }
   }
 
   protected void statusUpdate(TaskUmbilicalProtocol umbilical) 
@@ -952,9 +1009,24 @@ abstract public class Task implements Writable, Configurable {
 
     if (isMapTask() && conf.getNumReduceTasks() > 0) {
       try {
+    	if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/) {
+    	   int numsubtasks = taskStatus.getNumSubtasks();
+    	   if (numsubtasks <= 0)
+    		   throw new IOException("catch exception numsubtasks < 0 when calculate output size");
+    	   long sum = 0;
+    	   Path mapOutput = null;
+    	   FileSystem localFS = FileSystem.getLocal(conf);
+    	   for (int i=0; i<numsubtasks; ++i) {
+    		   mapOutput =  mapOutputFile.getSubtaskOutputFile(i);
+    		   sum += localFS.getFileStatus(mapOutput).getLen();
+    	   }
+    	   return sum;
+    	}
+    	else {
         Path mapOutput =  mapOutputFile.getOutputFile();
         FileSystem localFS = FileSystem.getLocal(conf);
         return localFS.getFileStatus(mapOutput).getLen();
+    	}
       } catch (IOException e) {
         LOG.warn ("Could not find output size " , e);
       }
@@ -1009,6 +1081,7 @@ abstract public class Task implements Writable, Configurable {
     // task can Commit now  
     try {
       LOG.info("Task " + taskId + " is allowed to commit now");
+      System.out.println("Task " + taskId + " is allowed to commit now");
       committer.commitTask(taskContext);
       return;
     } catch (IOException iee) {

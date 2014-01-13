@@ -57,7 +57,8 @@ public class TestWordCount extends HadoopTestCase {
     }
     {
       DataOutputStream file = inFs.create(new Path(inDir, "part-0"));
-      file.writeBytes("a b ad\nb\n\nc\nd\ne\nb");
+      for (int i=0; i<1000; ++i)
+        file.writeBytes("a b ad\nb\n\nc\nd\ne\nba b ad\nb\n\nc\nd\ne\nba b ad\nb\n\nc\nd\ne\n");
       file.close();
     }
     System.out.println("inFs:"+inFs);

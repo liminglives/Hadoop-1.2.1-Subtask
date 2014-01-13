@@ -244,6 +244,10 @@ public class DataNode extends Configured
   final String userWithLocalPathAccess;
   private boolean connectToDnViaHostname;
   private boolean relaxedVersionCheck;
+  
+  //for subblock
+  public  boolean isSubBlock ;
+  public  long subblockLength ;
 
   /**
    * Whether the DN completely skips version check with the NN.
@@ -347,6 +351,19 @@ public class DataNode extends Configured
       		"privileged resources.");
     
     this.secureResources = resources;
+    
+    this.isSubBlock = conf.getBoolean(
+    		"dfs.datanode.subblock", FSConstants.IS_SUBBLOCK_ON_V2);
+    this.subblockLength = conf.getLong(
+			"dfs.datanode.subblock.length", FSConstants.DEFAULT_SUBBLOCK_SIZE);
+    if (isSubBlock) {
+    	LOG.info("=====Liming: subblock is on!, subblock length="+subblockLength);
+    	//System.out.println("====Liming: subblock is on, subblock length="+subblockLength);
+    }
+   
+	if (subblockLength % 512 != 0)
+		throw new IOException("dfs.datanode.subblock.length is set wrong!");
+    	
     // use configured nameserver & interface to get local hostname
     if (conf.get("slave.host.name") != null) {
       machineName = conf.get("slave.host.name");   

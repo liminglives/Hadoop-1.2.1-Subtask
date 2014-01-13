@@ -4454,6 +4454,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
       }
 
       TaskInProgress tip = taskidToTIPMap.get(taskId);
+      
       // Check if the tip is known to the jobtracker. In case of a restarted
       // jt, some tasks might join in later
       if (tip != null || hasRestarted()) {
@@ -4461,6 +4462,9 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
           tip = job.getTaskInProgress(taskId.getTaskID());
           job.addRunningTaskToTIP(tip, taskId, status, false);
         }
+        //System.out.println("jobtracker-updatetaskstatus-succeeded: "+
+  		//	  "newStatusSubtasks="+report.getStatusSubtasks());
+  			 // ",oldStatusSubtasks="+tip.getTaskStatus(taskId).getStatusSubtasks());
         
         // Update the job and inform the listeners if necessary
         JobStatus prevStatus = (JobStatus)job.getStatus().clone();

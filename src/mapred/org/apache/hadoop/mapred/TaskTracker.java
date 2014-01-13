@@ -3537,6 +3537,7 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
         LOG.warn("Failed validating JVM", ie);
         return false;
       }
+      //System.out.println("tasktracker-statusupdate: getStatusSubtasks="+taskStatus.getStatusSubtasks());
       tip.reportProgress(taskStatus);
       return true;
     } else {
@@ -3997,7 +3998,8 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
       String mapId = request.getParameter("map");
       String reduceId = request.getParameter("reduce");
       String jobId = request.getParameter("job");
-
+      String subtaskId = request.getParameter("subtask");
+      //System.out.println("doget: mapid="+mapId+", reduceid="+reduceId+",subtaskid="+subtaskId);
       if (jobId == null) {
         throw new IOException("job parameter is required");
       }
@@ -4005,6 +4007,11 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
       if (mapId == null || reduceId == null) {
         throw new IOException("map and reduce parameters are required");
       }
+      boolean isSubtaskOutputOn = false;
+      if (subtaskId != null)
+    	  isSubtaskOutputOn = true;
+      //String mapIdbk = mapId;
+      
       ServletContext context = getServletContext();
       int reduce = Integer.parseInt(reduceId);
       byte[] buffer = new byte[MAX_BYTES_TO_READ];
@@ -4047,33 +4054,49 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
       }
       // Index file
       String intermediateOutputDir = TaskTracker.getIntermediateOutputDir(userName, jobId, mapId);
-      String indexKey = intermediateOutputDir + "/file.out.index";
+      String indexKey;
+      if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/) {
+    	indexKey = intermediateOutputDir + "/" + subtaskId + "file.out.index";
+      } else
+        indexKey = intermediateOutputDir + "/file.out.index";
+      
       Path indexFileName = fileIndexCache.get(indexKey);
+      
       if (indexFileName == null) {
         indexFileName = lDirAlloc.getLocalPathToRead(indexKey, conf);
         fileIndexCache.put(indexKey, indexFileName);
       }
 
       // Map-output file
-      String fileKey = intermediateOutputDir + "/file.out";
+      String fileKey;
+      if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/)
+    	  fileKey = intermediateOutputDir + "/" + subtaskId +"file.out";
+      else
+          fileKey = intermediateOutputDir + "/file.out";
       Path mapOutputFileName = fileCache.get(fileKey);
       if (mapOutputFileName == null) {
         mapOutputFileName = lDirAlloc.getLocalPathToRead(fileKey, conf);
         fileCache.put(fileKey, mapOutputFileName);
       }
-       
-
+      
+      String subtaskID = "";
+      if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/) 
+    	  subtaskID = mapId + "_subtask_" + subtaskId;
         /**
          * Read the index file to get the information about where
          * the map-output for the given reducer is available. 
          */
         IndexRecord info = 
-          tracker.indexCache.getIndexInformation(mapId, reduce,indexFileName, 
-              runAsUserName);
+          tracker.indexCache.getIndexInformation(
+        		  isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/ ? subtaskID : mapId, 
+        		  reduce,indexFileName, 
+                  runAsUserName);
           
         //set the custom "from-map-task" http header to the map task from which
         //the map output data is being transferred
         response.setHeader(FROM_MAP_TASK, mapId);
+        if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/)
+          response.setHeader(FROM_MAP_SUBTASK, subtaskId);
         
         //set the custom "Raw-Map-Output-Length" http header to 
         //the raw (decompressed) length
@@ -4090,7 +4113,11 @@ public class TaskTracker implements MRConstants, TaskUmbilicalProtocol,
         response.setHeader(FOR_REDUCE_TASK, Integer.toString(reduce));
 
         response.setBufferSize(RESPONSE_BUFFER_SIZE);
-
+        
+        System.out.println("TT-mapoutputservlet: "+
+      		  " indexFilename="+indexFileName+
+      		  ", rawlength="+info.rawLength+
+      		  ", partLength"+info.partLength);
         /**
          * Read the data from the sigle map-output file and
          * send it to the reducer.

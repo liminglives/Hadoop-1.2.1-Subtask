@@ -68,6 +68,7 @@ class Child {
 
   public static void main(String[] args) throws Throwable {
     LOG.debug("Child starting");
+    //LOG.error("===liming=== enter mapred.child.java args:" + args.toString());
 
     final JobConf defaultConf = new JobConf();
     String host = args[0];
@@ -341,6 +342,7 @@ class Child {
     Path localTaskFile =
       lDirAlloc.getLocalPathForWrite(TaskTracker.JOBFILE, jobConf);
     JobLocalizer.writeLocalJobFile(localTaskFile, jobConf);
+    //LOG.info("child: localTaskFile = "+localTaskFile);
     task.setJobFile(localTaskFile.toString());
     task.setConf(jobConf);
   }
