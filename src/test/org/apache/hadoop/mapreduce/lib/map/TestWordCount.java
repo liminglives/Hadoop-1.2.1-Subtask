@@ -48,7 +48,10 @@ public class TestWordCount extends HadoopTestCase {
     FileSystem inFs = inDir.getFileSystem(conf);
     FileSystem outFs = outDir.getFileSystem(conf);
     
-
+    conf.setBoolean("mapreduce.subtask.on", false);
+    conf.setBoolean("mapreduce.subtask.output.on", false);
+    conf.setBoolean("mapreduce.sub.reducetask.on", false);
+    
     Job job = new Job(conf, "WordCount");
     
     outFs.delete(outDir, true);
@@ -70,7 +73,8 @@ public class TestWordCount extends HadoopTestCase {
     job.setOutputKeyClass(Text.class);
     job.setOutputValueClass(IntWritable.class);
     FileInputFormat.addInputPath(job, inDir);
-    FileOutputFormat.setOutputPath(job, outDir);
+    FileOutputFormat.setOutputPath(job, outDir); 
+    
     if(!job.waitForCompletion(true))
     	System.out.println("job word count failed");
 

@@ -979,9 +979,14 @@ public class JobClient extends Configured implements MRConstants, Tool  {
 
           // Create the splits for the job
           FileSystem fs = submitJobDir.getFileSystem(jobCopy);
-          if (jobCopy.getBoolean(SUBTASK_OUTPUT_ON, IS_SUBTASK_OUTPUT_ON)/*MRConstants.IS_SUBTASK_OUTPUT_ON*/)
-            LOG.info("Using subtask and subtask output pre-shuffle");
+        
           LOG.info("Creating splits at " + fs.makeQualified(submitJobDir));
+          if (jobCopy.getBoolean(SUBTASK_ON, false))
+        	  LOG.info("subtask on map is on");
+          if (jobCopy.getBoolean(SUB_REDUCE_TASK_ON, IS_SUB_REDUCE_TASK_ON))
+        	  LOG.info("subtask on reduce is on");
+          if (jobCopy.getBoolean(SUBTASK_OUTPUT_ON, IS_SUBTASK_OUTPUT_ON)/*MRConstants.IS_SUBTASK_OUTPUT_ON*/)
+              LOG.info("Using subtask and subtask output pre-shuffle");
           int maps = writeSplits(context, submitJobDir);
           jobCopy.setNumMapTasks(maps);
           //jobCopy.setNumMapSubTasks(10);

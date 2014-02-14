@@ -123,6 +123,7 @@ public class FileOutputCommitter extends OutputCommitter {
     Path taskOutputPath = getTempTaskOutputPath(context);
     TaskAttemptID attemptId = context.getTaskAttemptID();
     JobConf job = context.getJobConf();
+    System.out.println("FileOutputCommiter.committask:taskOutputpath="+taskOutputPath);
     if (taskOutputPath != null) {
       FileSystem fs = taskOutputPath.getFileSystem(job);
       context.getProgressible().progress();
@@ -226,6 +227,7 @@ public class FileOutputCommitter extends OutputCommitter {
   Path getTempTaskOutputPath(TaskAttemptContext taskContext) {
     JobConf conf = taskContext.getJobConf();
     Path outputPath = FileOutputFormat.getOutputPath(conf);
+    System.out.println("FileOutputCommiter.getTempTaskOutPath:outputpath="+outputPath);
     if (outputPath != null) {
       Path p = new Path(outputPath,
                      (FileOutputCommitter.TEMP_DIR_NAME + Path.SEPARATOR +

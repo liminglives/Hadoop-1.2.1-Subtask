@@ -109,6 +109,7 @@ class ReduceTask extends Task {
   private ReduceCopier reduceCopier;
   private int numSubMaps;
   private int numNeedFetchMapOutput;
+  //private boolean isSubReduceTaskOn = false;
 
   private CompressionCodec codec;
 
@@ -406,9 +407,23 @@ class ReduceTask extends Task {
     }
     numNeedFetchMapOutput = isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/ ? numSubMaps : numMaps;
     
+    
+    isSubReduceTaskOn = job.getBoolean(MRConstants.SUB_REDUCE_TASK_ON, 
+    		MRConstants.IS_SUB_REDUCE_TASK_ON) ; 	
+    
+    if (isSubReduceTaskOn)
+    {
+    	if (useNewApi) {
+    		throw new IOException("In SubReduceTask, NewApi is not supported");
+    	}
     	
+    	runSubReduceRask(umbilical,job,reporter);
+    	done(umbilical, reporter);
+    	return;
+    }
 
     boolean isLocal = "local".equals(job.get("mapred.job.tracker", "local"));
+    System.out.println("reduce task: isLocal="+isLocal);
     if (!isLocal) {
       reduceCopier = new ReduceCopier(umbilical, job, reporter);
       if (!reduceCopier.fetchOutputs()) {
@@ -434,7 +449,9 @@ class ReduceTask extends Task {
         
     // free up the data structures
     mapOutputFilesOnDisk.clear();
-    
+    if (!isLocal)
+      reduceCopier.clearMapOutputFilesOnDisk();
+ 
     sortPhase.complete();                         // sort is complete
     setPhase(TaskStatus.Phase.REDUCE); 
     statusUpdate(umbilical);
@@ -450,6 +467,118 @@ class ReduceTask extends Task {
                     keyClass, valueClass);
     }
     done(umbilical, reporter);
+  }
+  
+  private void runSubReduceRask(TaskUmbilicalProtocol umbilical, 
+  		JobConf job,
+        TaskReporter reporter) throws InterruptedException {
+	  List<SubReduceTaskRunner> listSubReduceTask = new ArrayList<SubReduceTaskRunner>();
+  	  numSubTaskPerReduce = job.getInt(MRConstants.NUM_OF_SUBTASK_ON_REDUCE,
+  			  MRConstants.NUM_OF_SUBTASK_PER_REDUCE) ;
+      int reduceId = getTaskID().getId();
+      int numReduce = job.getNumReduceTasks();
+  	  for (int i=0; i<numSubTaskPerReduce; ++i)
+  	  {
+  		SubReduceTaskRunner runner = new SubReduceTaskRunner(umbilical, job, reporter, reduceId+i); 
+  	    listSubReduceTask.add(runner);
+  		runner.start();
+  	  }
+      for (SubReduceTaskRunner runner : listSubReduceTask)
+      {
+      	runner.join();
+      }
+  }
+  
+  private class SubReduceTaskRunner extends Thread{
+	private TaskUmbilicalProtocol umbilical;
+	private JobConf job;
+    private TaskReporter reporter;
+    
+    private ReduceCopier subReduceCopier;
+    //private Progress copyPhase;
+    //private Progress sortPhase;
+    //private Progress reducePhase;
+    
+    private int subReduceTaskId;
+    
+    public SubReduceTaskRunner(TaskUmbilicalProtocol umbilical, 
+    		JobConf conf,
+            TaskReporter reporter,
+            int taskid){
+    	this.umbilical = umbilical;
+    	this.job = conf;
+    	this.reporter = reporter;
+    	this.subReduceTaskId = taskid;
+    }
+    public void run(){
+    	boolean isLocal = "local".equals(job.get("mapred.job.tracker", "local"));
+    	boolean useNewApi = job.getUseNewReducer();
+        System.out.println("reduce task: isLocal="+isLocal);
+        try {
+          if (false && isMapOrReduce()) {
+            copyPhase = getProgress().addPhase("copy");
+        	sortPhase  = getProgress().addPhase("sort");
+        	reducePhase = getProgress().addPhase("reduce");
+          }	
+          if (!isLocal) {
+          
+			subReduceCopier = new ReduceCopier(umbilical, job, reporter, subReduceTaskId);
+			if (!subReduceCopier.fetchOutputs()) {
+			    if(subReduceCopier.mergeThrowable instanceof FSError) {
+			      throw (FSError)subReduceCopier.mergeThrowable;
+			    }
+			    throw new IOException("Task: " + getTaskID() + 
+			        " - The reduce copier failed", subReduceCopier.mergeThrowable);
+			  }
+		  } 
+          copyPhase.complete();                         // copy is already complete
+          setPhase(TaskStatus.Phase.SORT);
+          statusUpdate(umbilical);
+          
+          final FileSystem rfs = FileSystem.getLocal(job).getRaw();
+          RawKeyValueIterator rIter = isLocal
+            ? Merger.merge(job, rfs, job.getMapOutputKeyClass(),
+                job.getMapOutputValueClass(), codec, getMapFiles(rfs, true),
+                !conf.getKeepFailedTaskFiles(), job.getInt("io.sort.factor", 100),
+                new Path(getTaskID().toString()), job.getOutputKeyComparator(),
+                reporter, spilledRecordsCounter, null)
+            : subReduceCopier.createKVIterator(job, rfs, reporter);
+            
+            subReduceCopier.clearMapOutputFilesOnDisk();
+            
+            sortPhase.complete();                         // sort is complete
+            setPhase(TaskStatus.Phase.REDUCE); 
+            statusUpdate(umbilical);
+          
+            Class keyClass = job.getMapOutputKeyClass();
+            Class valueClass = job.getMapOutputValueClass();
+            RawComparator comparator = job.getOutputValueGroupingComparator();
+
+            if (useNewApi) {
+              runNewReducer(job, umbilical, reporter, rIter, comparator, 
+                            keyClass, valueClass);
+            } else {
+              runOldSubReducer(job, umbilical, reporter, rIter, comparator, 
+                            keyClass, valueClass, subReduceTaskId);
+            }
+        
+        } //end try
+        catch (ClassNotFoundException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		} catch (IOException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+        catch (FSError e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		} catch (InterruptedException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+        
+    }
   }
 
   private class OldTrackingRecordWriter<K, V> implements RecordWriter<K, V> {
@@ -515,6 +644,73 @@ class ReduceTask extends Task {
       ReflectionUtils.newInstance(job.getReducerClass(), job);
     // make output collector
     String finalName = getOutputName(getPartition());
+
+    RecordWriter<OUTKEY, OUTVALUE> out = 
+        new OldTrackingRecordWriter<OUTKEY, OUTVALUE>(
+            reduceOutputCounter, job, reporter, finalName);
+    final RecordWriter<OUTKEY, OUTVALUE> finalOut = out;
+    
+    OutputCollector<OUTKEY,OUTVALUE> collector = 
+      new OutputCollector<OUTKEY,OUTVALUE>() {
+        public void collect(OUTKEY key, OUTVALUE value)
+          throws IOException {
+          finalOut.write(key, value);
+          // indicate that progress update needs to be sent
+          reporter.progress();
+        }
+      };
+    
+    // apply reduce function
+    try {
+      //increment processed counter only if skipping feature is enabled
+      boolean incrProcCount = SkipBadRecords.getReducerMaxSkipGroups(job)>0 &&
+        SkipBadRecords.getAutoIncrReducerProcCount(job);
+      
+      ReduceValuesIterator<INKEY,INVALUE> values = isSkipping() ? 
+          new SkippingReduceValuesIterator<INKEY,INVALUE>(rIter, 
+              comparator, keyClass, valueClass, 
+              job, reporter, umbilical) :
+          new ReduceValuesIterator<INKEY,INVALUE>(rIter, 
+          job.getOutputValueGroupingComparator(), keyClass, valueClass, 
+          job, reporter);
+      values.informReduceProgress();
+      while (values.more()) {
+        reduceInputKeyCounter.increment(1);
+        reducer.reduce(values.getKey(), values, collector, reporter);
+        if(incrProcCount) {
+          reporter.incrCounter(SkipBadRecords.COUNTER_GROUP, 
+              SkipBadRecords.COUNTER_REDUCE_PROCESSED_GROUPS, 1);
+        }
+        values.nextKey();
+        values.informReduceProgress();
+      }
+
+      //Clean up: repeated in catch block below
+      reducer.close();
+      reducer = null;
+      
+      out.close(reporter);
+      out = null;
+      //End of clean up.
+    } finally {
+      IOUtils.cleanup(LOG, reducer);
+      closeQuietly(out, reporter);
+    }
+  }
+  
+  private <INKEY,INVALUE,OUTKEY,OUTVALUE>
+  void runOldSubReducer(JobConf job,
+                     TaskUmbilicalProtocol umbilical,
+                     final TaskReporter reporter,
+                     RawKeyValueIterator rIter,
+                     RawComparator<INKEY> comparator,
+                     Class<INKEY> keyClass,
+                     Class<INVALUE> valueClass,
+                     int subReduceTaskId) throws IOException {
+    Reducer<INKEY,INVALUE,OUTKEY,OUTVALUE> reducer = 
+      ReflectionUtils.newInstance(job.getReducerClass(), job);
+    // make output collector
+    String finalName = getOutputName(subReduceTaskId);
 
     RecordWriter<OUTKEY, OUTVALUE> out = 
         new OldTrackingRecordWriter<OUTKEY, OUTVALUE>(
@@ -691,6 +887,9 @@ class ReduceTask extends Task {
     /** Reference to the umbilical object */
     private TaskUmbilicalProtocol umbilical;
     private final TaskReporter reporter;
+    
+    /** for sub reduce task*/
+    private int subReduceTaskId = -1;
     
     /** Reference to the task object */
     
@@ -928,6 +1127,9 @@ class ReduceTask extends Task {
     private final List<MapOutput> mapOutputsFilesInMemory =
       Collections.synchronizedList(new LinkedList<MapOutput>());
     
+    private final SortedSet<CompressAwareFileStatus> mapOutputFilesOnDisk = 
+        new TreeSet<CompressAwareFileStatus>(mapOutputFileComparator);
+    
     /**
      * The map for (Hosts, List of MapIds from this Host) maintaining
      * map output locations
@@ -1158,9 +1360,14 @@ class ReduceTask extends Task {
                                 maxInMemCopyUse);
         }
         // Allow unit tests to fix Runtime memory
+        if (!isSubReduceTaskOn)//MRConstants.IS_SUB_REDUCE_TASK_ON)
         maxSize = (int)(conf.getInt("mapred.job.reduce.total.mem.bytes",
             (int)Math.min(Runtime.getRuntime().maxMemory(), Integer.MAX_VALUE))
           * maxInMemCopyUse);
+        else
+        	maxSize = ((int)(conf.getInt("mapred.job.reduce.total.mem.bytes",
+                    (int)Math.min(Runtime.getRuntime().maxMemory(), Integer.MAX_VALUE))
+                  * maxInMemCopyUse))/numSubTaskPerReduce;//MRConstants.NUM_OF_SUBTASK_PER_REDUCE;
         maxSingleShuffleLimit = (long)(maxSize * MAX_SINGLE_SHUFFLE_SEGMENT_FRACTION);
         LOG.info("ShuffleRamManager: MemoryLimit=" + maxSize + 
                  ", MaxSingleShuffleLimit=" + maxSingleShuffleLimit);
@@ -1300,7 +1507,10 @@ class ReduceTask extends Task {
       private final SecretKey jobTokenSecret;
       
       public MapOutputCopier(JobConf job, Reporter reporter, SecretKey jobTokenSecret) {
-        setName("MapOutputCopier " + reduceTask.getTaskID() + "." + id);
+    	if (subReduceTaskId == -1)
+          setName("MapOutputCopier " + reduceTask.getTaskID() + "." + id);
+    	else
+    	  setName("MapOutputCopier " + reduceTask.getTaskID() +subReduceTaskId+ "." + id);
         LOG.debug(getName() + " created");
         this.reporter = reporter;
 
@@ -1444,20 +1654,38 @@ class ReduceTask extends Task {
         Path filename =
             new Path(String.format(
                 MapOutputFile.REDUCE_INPUT_FILE_FORMAT_STRING,
-                TaskTracker.OUTPUT, loc.getTaskId().getId()));
+                TaskTracker.OUTPUT, loc.getTaskId().getId())); //racecondition
+        
+        if (subReduceTaskId == -1)
+        	filename = new Path(String.format(
+                    MapOutputFile.REDUCE_INPUT_FILE_FORMAT_STRING,
+                    TaskTracker.OUTPUT, loc.getTaskId().getId()));
+        else
+        	filename = new Path(String.format(
+                    MapOutputFile.REDUCE_INPUT_FILE_FORMAT_STRING,
+                    TaskTracker.OUTPUT, loc.getTaskId().getId())+subReduceTaskId);
 
         // Copy the map output to a temp file whose name is unique to this attempt 
         Path tmpMapOutput = new Path(filename+"-"+id);
-        
+        //if (subReduceTaskId == -1)
+        //  tmpMapOutput = new Path(filename+"-"+id);
+        //else
+        //  tmpMapOutput = new Path(filename+"-"+subReduceTaskId+"-"+id);
+        System.out.println("MapOutputCopier.copyOutput:tmpMapOutput="+tmpMapOutput);
         // Copy the map output
-        MapOutput mapOutput = getMapOutput(loc, tmpMapOutput,
-                                           reduceId.getTaskID().getId());
+        MapOutput mapOutput ;
+        if (subReduceTaskId == -1)
+        	mapOutput = getMapOutput(loc, tmpMapOutput,
+                    reduceId.getTaskID().getId());
+        else
+        	mapOutput = getMapOutput(loc, tmpMapOutput,
+                    getSubReduceTaskId());
         if (mapOutput == null) {
           throw new IOException("Failed to fetch map-output for " + 
                                 loc.getTaskAttemptId() + " from " + 
                                 loc.getHost());
         }
-        
+        //System.out.println("MapOutputCopier.copyOutput:mapOutput="+mapOutput.file.getName());
         // The size of the map-output
         long bytes = mapOutput.compressedSize;
         
@@ -1887,7 +2115,7 @@ class ReduceTask extends Task {
                         conf, localFileSys.makeQualified(localFilename), 
                         mapOutputLength);
 
-
+        System.out.println("shuffletodisk:localfilename="+localFilename+" qualifid="+localFileSys.makeQualified(localFilename));
         // Copy data to local-disk
         OutputStream output = null;
         long bytesRead = 0;
@@ -2008,6 +2236,13 @@ class ReduceTask extends Task {
     }
     
     public ReduceCopier(TaskUmbilicalProtocol umbilical, JobConf conf,
+            TaskReporter reporter, int subtaskid
+            ) throws ClassNotFoundException, IOException{
+    	this(umbilical, conf, reporter);
+    	this.subReduceTaskId = subtaskid;
+    }
+    
+    public ReduceCopier(TaskUmbilicalProtocol umbilical, JobConf conf,
                         TaskReporter reporter
                         )throws ClassNotFoundException, IOException {
       
@@ -2015,11 +2250,11 @@ class ReduceTask extends Task {
       this.reporter = reporter;
       this.shuffleClientMetrics = createShuffleClientInstrumentation();
       this.umbilical = umbilical;      
-      this.reduceTask = ReduceTask.this;
+      this.reduceTask = ReduceTask.this; //racecondition
 
       this.scheduledCopies = new ArrayList<MapOutputLocation>(100);
       this.copyResults = new ArrayList<CopyResult>(100);    
-      this.numCopiers = conf.getInt("mapred.reduce.parallel.copies", 10/*5*/);
+      this.numCopiers = conf.getInt("mapred.reduce.parallel.copies", 5);
       this.maxInFlight = 4 * numCopiers;
       Counters.Counter combineInputCounter = 
         reporter.getCounter(Task.Counter.COMBINE_INPUT_RECORDS);
@@ -2035,14 +2270,17 @@ class ReduceTask extends Task {
       
 
       this.abortFailureLimit = Math.max(30, numNeedFetchMapOutput/*numMaps*/ / 10);
-     
+    
 
       this.maxFetchFailuresBeforeReporting = conf.getInt(
           "mapreduce.reduce.shuffle.maxfetchfailures", REPORT_FAILURE_LIMIT);
 
       this.maxFailedUniqueFetches = Math.min(numNeedFetchMapOutput/*numMaps*/, 
                                              this.maxFailedUniqueFetches);
+      if (!isSubReduceTaskOn)
       this.maxInMemOutputs = conf.getInt("mapred.inmem.merge.threshold", 1000);
+      else
+    	  this.maxInMemOutputs = conf.getInt("mapred.inmem.merge.threshold", 1000)/numSubTaskPerReduce;
       this.maxInMemCopyPer =
         conf.getFloat("mapred.job.shuffle.merge.percent", 0.66f);
       final float maxRedPer =
@@ -2051,8 +2289,12 @@ class ReduceTask extends Task {
         throw new IOException("mapred.job.reduce.input.buffer.percent" +
                               maxRedPer);
       }
+      if (!isSubReduceTaskOn)//MRConstants.IS_SUB_REDUCE_TASK_ON)
       this.maxInMemReduce = (int)Math.min(
           Runtime.getRuntime().maxMemory() * maxRedPer, Integer.MAX_VALUE);
+      else
+    	  this.maxInMemReduce = ((int)Math.min(
+    	          Runtime.getRuntime().maxMemory() * maxRedPer, Integer.MAX_VALUE))/numSubTaskPerReduce;//MRConstants.NUM_OF_SUBTASK_PER_REDUCE;
 
       // Setup the RamManager
       ramManager = new ShuffleRamManager(conf);
@@ -2069,9 +2311,9 @@ class ReduceTask extends Task {
       
       // Seed the random number generator with a reasonably globally unique seed
       long randomSeed = System.nanoTime() + 
-                        (long)Math.pow(this.reduceTask.getPartition(),
-                                       (this.reduceTask.getPartition()%10)
-                                      );
+                        (long)Math.pow(subReduceTaskId==-1? this.reduceTask.getPartition():getSubReduceTaskId(),
+                                       ((subReduceTaskId==-1? this.reduceTask.getPartition():getSubReduceTaskId())%10)
+                                      ); //racecondition
       this.random = new Random(randomSeed);
       this.maxMapRuntime = 0;
       this.reportReadErrorImmediately = 
@@ -2080,6 +2322,11 @@ class ReduceTask extends Task {
     
     private boolean busyEnough(int numInFlight) {
       return numInFlight > maxInFlight;
+    }
+    
+    public int getSubReduceTaskId()
+    {
+      return this.subReduceTaskId;
     }
     
     
@@ -2537,7 +2784,11 @@ class ReduceTask extends Task {
       Class<K> keyClass = (Class<K>)job.getMapOutputKeyClass();
       Class<V> valueClass = (Class<V>)job.getMapOutputValueClass();
       boolean keepInputs = job.getKeepFailedTaskFiles();
-      final Path tmpDir = new Path(getTaskID().toString());
+      final Path tmpDir; //= new Path(getTaskID().toString());
+      if (subReduceTaskId == -1)
+    	  tmpDir = new Path(getTaskID().toString());
+      else
+    	  tmpDir = new Path(getTaskID().toString()+subReduceTaskId);
       final RawComparator<K> comparator =
         (RawComparator<K>)job.getOutputKeyComparator();
 
@@ -2552,8 +2803,11 @@ class ReduceTask extends Task {
         if (numMemDiskSegments > 0 &&
               ioSortFactor > mapOutputFilesOnDisk.size()) {
           // must spill to disk, but can't retain in-mem for intermediate merge
-          final Path outputPath =
-              mapOutputFile.getInputFileForWrite(mapId, inMemToDiskBytes);
+          final Path outputPath;
+          if (subReduceTaskId == -1)
+        	  outputPath = mapOutputFile.getInputFileForWrite(mapId, inMemToDiskBytes);
+          else
+        	  outputPath = mapOutputFile.getInputFileForWriteInSubReduceTask(mapId, inMemToDiskBytes, subReduceTaskId);
           final RawKeyValueIterator rIter = Merger.merge(job, fs,
               keyClass, valueClass, memDiskSegments, numMemDiskSegments,
               tmpDir, comparator, reporter, spilledRecordsCounter, null);
@@ -2637,6 +2891,11 @@ class ReduceTask extends Task {
       return Merger.merge(job, fs, keyClass, valueClass,
                    finalSegments, finalSegments.size(), tmpDir,
                    comparator, reporter, spilledRecordsCounter, null);
+    }
+    
+    public void clearMapOutputFilesOnDisk() {
+    	mapOutputFilesOnDisk.clear();
+    
     }
 
     class RawKVIteratorReader extends IFile.Reader<K,V> {
@@ -2778,13 +3037,19 @@ class ReduceTask extends Task {
               lDirAlloc.getLocalPathForWrite(mapFiles.get(0).toString(), 
                                              approxOutputSize, conf)
               .suffix(".merged");
+            System.out.println("reduceCopier.LocalFSMerger:outputpath="+outputPath+
+            		" mapFiles.get(0)="+mapFiles.get(0).toString());
             Writer writer = 
               new Writer(conf,rfs, outputPath, 
                          conf.getMapOutputKeyClass(), 
                          conf.getMapOutputValueClass(),
                          codec, null);
             RawKeyValueIterator iter  = null;
-            Path tmpDir = new Path(reduceTask.getTaskID().toString());
+            Path tmpDir; //racecondition
+            if (subReduceTaskId == -1)
+            	tmpDir = new Path(reduceTask.getTaskID().toString());
+            else
+            	tmpDir = new Path(reduceTask.getTaskID().toString()+"-"+subReduceTaskId);
             long decompressedBytesWritten;
             try {
               iter = Merger.merge(conf, rfs,
@@ -2900,7 +3165,8 @@ class ReduceTask extends Task {
                                (Class<K>)conf.getMapOutputKeyClass(),
                                (Class<V>)conf.getMapOutputValueClass(),
                                inMemorySegments, inMemorySegments.size(),
-                               new Path(reduceTask.getTaskID().toString()),
+                               new Path(reduceTask.getTaskID().toString()+
+                            		   (subReduceTaskId==-1? "":("-"+subReduceTaskId))),
                                conf.getOutputKeyComparator(), reporter,
                                spilledRecordsCounter, null);
           
@@ -3014,6 +3280,11 @@ class ReduceTask extends Task {
         
         // Update the last seen event ID
         fromEventId.set(fromEventId.get() + events.length);
+        int reduceId;
+        if (subReduceTaskId == -1)
+        	reduceId = getPartition();
+        else
+            reduceId = getSubReduceTaskId();
         
         // Process the TaskCompletionEvents:
         // 1. Save the SUCCEEDED maps in knownOutputs to fetch the outputs.
@@ -3041,8 +3312,8 @@ class ReduceTask extends Task {
               URL mapOutputLocation;
               if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/) {
             	  long subtasksCompletion = event.getSubtasksCompletion();
-            	  System.out.println("reducetask-getMapCompletionEvents: subtasksCompletion="+
-            			  subtasksCompletion+", status="+event.getTaskStatus());
+            	  //System.out.println("reducetask-getMapCompletionEvents: subtasksCompletion="+
+            		//	  subtasksCompletion+", status="+event.getTaskStatus());
             	  if ((subtasksCompletion ) == 0)
             	    continue;
             	  for (int i=0; i<MRConstants.MAX_NUM_SUBTASKS; ++i) {
@@ -3051,10 +3322,10 @@ class ReduceTask extends Task {
             	      mapOutputLocation = new URL(event.getTaskTrackerHttp() + 
                           "/mapOutput?job=" + taskId.getJobID() +
                           "&map=" + taskId + 
-                          "&reduce=" + getPartition() +
+                          "&reduce=" + reduceId + //getPartition() +
                           "&subtask=" + i);
             	      
-            	      System.out.println("reducetask-getMapCompletionEvents----: mapOutputLocation="+mapOutputLocation);
+            	      //System.out.println("reducetask-getMapCompletionEvents----: mapOutputLocation="+mapOutputLocation);
                       List<MapOutputLocation> loc = mapLocations.get(host);
                       if (loc == null) {
                         loc = Collections.synchronizedList
@@ -3072,8 +3343,8 @@ class ReduceTask extends Task {
               mapOutputLocation = new URL(event.getTaskTrackerHttp() + 
                                       "/mapOutput?job=" + taskId.getJobID() +
                                       "&map=" + taskId + 
-                                      "&reduce=" + getPartition());
-              System.out.println("reducetask-getMapCompletionEvents: mapOutputLocation="+mapOutputLocation);
+                                      "&reduce=" + reduceId);//getPartition());
+              //System.out.println("reducetask-getMapCompletionEvents: mapOutputLocation="+mapOutputLocation);
               List<MapOutputLocation> loc = mapLocations.get(host);
               if (loc == null) {
                 loc = Collections.synchronizedList

@@ -164,6 +164,8 @@ public class FileOutputCommitter extends OutputCommitter {
   public void commitTask(TaskAttemptContext context) 
   throws IOException {
     TaskAttemptID attemptId = context.getTaskAttemptID();
+    System.out.println("mapreduce.fileoutputcommiter.committask:outputpath="+outputPath+
+    		" workpath="+workPath);
     if (workPath != null) {
       context.progress();
       if (outputFileSystem.exists(workPath)) {
@@ -198,6 +200,7 @@ public class FileOutputCommitter extends OutputCommitter {
     if (fs.isFile(taskOutput)) {
       Path finalOutputPath = getFinalPath(jobOutputDir, taskOutput, 
                                           workPath);
+      System.out.println("mapreduce.fileoutputcommiter.movetaskoutputs:finaloutputpath="+finalOutputPath);
       if (!fs.rename(taskOutput, finalOutputPath)) {
         if (!fs.delete(finalOutputPath, true)) {
           throw new IOException("Failed to delete earlier output of task: " + 

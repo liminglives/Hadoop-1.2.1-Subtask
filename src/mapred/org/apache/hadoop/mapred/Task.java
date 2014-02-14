@@ -167,6 +167,8 @@ abstract public class Task implements Writable, Configurable {
   protected JvmContext jvmContext;
   
   protected boolean isSubtaskOutputOn; 
+  protected boolean isSubReduceTaskOn = false;
+  protected int numSubTaskPerReduce = -1;
 
   ////////////////////////////////////////////
   // Constructors

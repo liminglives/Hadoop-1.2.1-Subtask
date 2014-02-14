@@ -70,4 +70,8 @@ interface MRConstants {
 	                         org.apache.hadoop.hdfs.protocol.FSConstants.DEFAULT_SUBBLOCK_SIZE;
   public static final String SUBTASK_OUTPUT_ON = "mapreduce.subtask.output.on";
   public static final String SUBTASK_ON = "mapreduce.subtask.on";
+  public static final boolean IS_SUB_REDUCE_TASK_ON = true;
+  public static final int NUM_OF_SUBTASK_PER_REDUCE = 4;
+  public static final String SUB_REDUCE_TASK_ON = "mapreduce.sub.reducetask.on";
+  public static final String NUM_OF_SUBTASK_ON_REDUCE = "num.subtasks.per.reduce";
 }

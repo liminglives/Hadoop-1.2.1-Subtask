@@ -380,6 +380,11 @@ class MapTask extends Task {
     		", NumSubMaps="+numSubMaps);
       isMapSubtask = true;
     }
+    
+    isSubReduceTaskOn = job.getBoolean(MRConstants.SUB_REDUCE_TASK_ON, 
+    		MRConstants.IS_SUB_REDUCE_TASK_ON) ; 
+    numSubTaskPerReduce = job.getInt(MRConstants.NUM_OF_SUBTASK_ON_REDUCE,
+			  MRConstants.NUM_OF_SUBTASK_PER_REDUCE) ;
     // check if it is a cleanupJobTask
     if (jobCleanup) {
       runJobCleanupTask(umbilical, reporter);
@@ -638,7 +643,12 @@ class MapTask extends Task {
 
     @SuppressWarnings("unchecked")
     OldOutputCollector(MapOutputCollector<K,V> collector, JobConf conf) {
-      numPartitions = conf.getNumReduceTasks();
+      if (conf.getBoolean(MRConstants.SUB_REDUCE_TASK_ON, 
+      		MRConstants.IS_SUB_REDUCE_TASK_ON)/*MRConstants.IS_SUB_REDUCE_TASK_ON*/)
+          numPartitions = conf.getNumReduceTasks() * conf.getInt(MRConstants.NUM_OF_SUBTASK_ON_REDUCE,
+      			  MRConstants.NUM_OF_SUBTASK_PER_REDUCE);//MRConstants.NUM_OF_SUBTASK_PER_REDUCE;
+      else
+    	  numPartitions = conf.getNumReduceTasks();
       if (numPartitions > 0) {
         partitioner = (Partitioner<K,V>)
           ReflectionUtils.newInstance(conf.getPartitionerClass(), conf);
@@ -1309,6 +1319,8 @@ class MapTask extends Task {
     ArrayList<SpillRecord> indexCacheList = new ArrayList<SpillRecord>();
     FileSystem rfs = ((LocalFileSystem)FileSystem.getLocal(job)).getRaw();
     int partitions = job.getNumReduceTasks();
+    if (isSubReduceTaskOn/*MRConstants.IS_SUB_REDUCE_TASK_ON*/)
+    	partitions = job.getNumReduceTasks() * numSubTaskPerReduce;//MRConstants.NUM_OF_SUBTASK_PER_REDUCE;
     Class<K> keyClass = (Class<K>)job.getMapOutputKeyClass();
     Class<V> valClass = (Class<V>)job.getMapOutputValueClass();
     
@@ -1663,7 +1675,10 @@ rfs.delete(filename[i],true);
       this.job = job;
       this.reporter = reporter;
       localFs = FileSystem.getLocal(job);
-      partitions = job.getNumReduceTasks();
+      if (isSubReduceTaskOn/*MRConstants.IS_SUB_REDUCE_TASK_ON*/)
+    	  partitions = job.getNumReduceTasks() * numSubTaskPerReduce;//MRConstants.NUM_OF_SUBTASK_PER_REDUCE;
+      else
+          partitions = job.getNumReduceTasks();
        
       rfs = ((LocalFileSystem)localFs).getRaw();
 
