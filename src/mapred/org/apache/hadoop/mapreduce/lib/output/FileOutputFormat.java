@@ -119,6 +119,10 @@ public abstract class FileOutputFormat<K, V> extends OutputFormat<K, V> {
   public abstract RecordWriter<K, V> 
      getRecordWriter(TaskAttemptContext job
                      ) throws IOException, InterruptedException;
+  
+  public abstract RecordWriter<K, V> 
+  getRecordWriter(TaskAttemptContext context, int subtaskid
+                  ) throws IOException, InterruptedException;
 
   public void checkOutputSpecs(JobContext job
                                ) throws FileAlreadyExistsException, IOException{

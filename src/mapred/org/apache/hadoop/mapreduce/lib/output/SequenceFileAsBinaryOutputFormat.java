@@ -158,7 +158,27 @@ public class SequenceFileAsBinaryOutputFormat
       }
     };
   }
+  public RecordWriter<BytesWritable, BytesWritable> getRecordWriter(
+      TaskAttemptContext context, int subtaskid) throws IOException {
+    final SequenceFile.Writer out = getSequenceWriter(context, subtaskid,
+      getSequenceFileOutputKeyClass(context),
+      getSequenceFileOutputValueClass(context)); 
 
+    return new RecordWriter<BytesWritable, BytesWritable>() {
+      private WritableValueBytes wvaluebytes = new WritableValueBytes();
+
+      public void write(BytesWritable bkey, BytesWritable bvalue)
+        throws IOException {
+        wvaluebytes.reset(bvalue);
+        out.appendRaw(bkey.getBytes(), 0, bkey.getLength(), wvaluebytes);
+        wvaluebytes.reset(null);
+      }
+
+      public void close(TaskAttemptContext context) throws IOException { 
+        out.close();
+      }
+    };
+  }
   protected SequenceFile.Writer getSequenceWriter(TaskAttemptContext context,
       Class<?> keyClass, Class<?> valueClass)
       throws IOException {
@@ -185,7 +205,33 @@ public class SequenceFileAsBinaryOutputFormat
              codec,
              context);
   }
+  protected SequenceFile.Writer getSequenceWriter(TaskAttemptContext context, int subtaskid,
+      Class<?> keyClass, Class<?> valueClass)
+      throws IOException {
+    Configuration conf = context.getConfiguration();
 
+    CompressionCodec codec = null;
+    CompressionType compressionType = CompressionType.NONE;
+    if (getCompressOutput(context)) {
+      // find the kind of compression to do
+      compressionType = getOutputCompressionType(context);
+      // find the right codec
+      Class<?> codecClass = getOutputCompressorClass(context,
+                                                     DefaultCodec.class);
+      codec = (CompressionCodec)
+        ReflectionUtils.newInstance(codecClass, conf);
+    }
+    // get the path of the temporary output file
+    Path file = getDefaultWorkFile(context, Integer.toString(subtaskid));
+    FileSystem fs = file.getFileSystem(conf);
+    conf.set("reduce.tmp.output.file."+Integer.toString(subtaskid), file.toString());
+    return SequenceFile.createWriter(fs, conf, file,
+             keyClass,
+             valueClass,
+             compressionType,
+             codec,
+             context);
+  }
   @Override 
   public void checkOutputSpecs(JobContext job) throws IOException {
     super.checkOutputSpecs(job);

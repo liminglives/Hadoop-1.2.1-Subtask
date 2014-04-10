@@ -53,6 +53,10 @@ public abstract class OutputFormat<K, V> {
   public abstract RecordWriter<K, V> 
     getRecordWriter(TaskAttemptContext context
                     ) throws IOException, InterruptedException;
+  
+  public abstract RecordWriter<K, V> 
+  getRecordWriter(TaskAttemptContext context, int subtaskid
+                  ) throws IOException, InterruptedException;
 
   /** 
    * Check for validity of the output-specification for the job.

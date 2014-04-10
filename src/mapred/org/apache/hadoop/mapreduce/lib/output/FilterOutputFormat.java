@@ -54,6 +54,10 @@ public class FilterOutputFormat <K,V> extends OutputFormat<K, V> {
   throws IOException, InterruptedException {
     return getBaseOut().getRecordWriter(context);
   }
+  public RecordWriter<K, V> getRecordWriter(TaskAttemptContext context, int subtaskid) 
+  throws IOException, InterruptedException {
+    return getBaseOut().getRecordWriter(context, subtaskid);
+  }
 
   @Override
   public void checkOutputSpecs(JobContext context) 

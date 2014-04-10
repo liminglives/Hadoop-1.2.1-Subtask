@@ -228,7 +228,7 @@ class MapOutputFile {
   public Path getInputFileForWriteInSubReduceTask(TaskID mapId, long size, int subReduceTaskId)
       throws IOException {
 	  return lDirAlloc.getLocalPathForWrite(String.format(
-		        REDUCE_INPUT_FILE_FORMAT_STRING, TaskTracker.OUTPUT, mapId.getId())+"-"+"subReduceTaskId",
+		        REDUCE_INPUT_FILE_FORMAT_STRING, TaskTracker.OUTPUT, mapId.getId())+"-"+subReduceTaskId,
 		        size, conf);
   }
 

@@ -81,7 +81,7 @@ public class Progress {
   }
 
   /** Called during execution on a leaf node to set its progress. */
-  public synchronized void set(float progress) {
+  public  void set(float progress) {
     this.progress = progress;
   }
 

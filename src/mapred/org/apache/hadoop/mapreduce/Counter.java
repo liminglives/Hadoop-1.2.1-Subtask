@@ -115,7 +115,7 @@ public class Counter implements Writable {
    * Increment this counter by the given value
    * @param incr the value to increase this counter by
    */
-  public synchronized void increment(long incr) {
+  public void increment(long incr) {
     value += incr;
   }
 

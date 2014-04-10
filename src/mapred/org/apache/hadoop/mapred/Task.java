@@ -579,7 +579,7 @@ abstract public class Task implements Writable, Configurable {
     		subtasksProgress[i] = 0.0f;
     }
     
-    public synchronized void setProgress(float progress, int subtaskId) {
+    public void setProgress(float progress, int subtaskId) {
 		if (subtaskId<0 || numSubtask<0)
 			setProgress(progress);
 		else {

@@ -227,7 +227,7 @@ public class FileOutputCommitter extends OutputCommitter {
   Path getTempTaskOutputPath(TaskAttemptContext taskContext) {
     JobConf conf = taskContext.getJobConf();
     Path outputPath = FileOutputFormat.getOutputPath(conf);
-    System.out.println("FileOutputCommiter.getTempTaskOutPath:outputpath="+outputPath);
+    //System.out.println("FileOutputCommiter.getTempTaskOutPath:outputpath="+outputPath);
     if (outputPath != null) {
       Path p = new Path(outputPath,
                      (FileOutputCommitter.TEMP_DIR_NAME + Path.SEPARATOR +

@@ -37,7 +37,13 @@ public class NullOutputFormat<K, V> extends OutputFormat<K, V> {
         public void close(TaskAttemptContext context) { }
       };
   }
-  
+  public RecordWriter<K, V> 
+         getRecordWriter(TaskAttemptContext contextm, int subtaskid) {
+    return new RecordWriter<K, V>(){
+        public void write(K key, V value) { }
+        public void close(TaskAttemptContext context) { }
+      };
+  }
   @Override
   public void checkOutputSpecs(JobContext context) { }
   

@@ -107,6 +107,7 @@ public class TextOutputFormat<K, V> extends FileOutputFormat<K, V> {
     }
   }
 
+  
   public RecordWriter<K, V> 
          getRecordWriter(TaskAttemptContext job
                          ) throws IOException, InterruptedException {
@@ -124,6 +125,35 @@ public class TextOutputFormat<K, V> extends FileOutputFormat<K, V> {
     }
     Path file = getDefaultWorkFile(job, extension);
     FileSystem fs = file.getFileSystem(conf);
+    if (!isCompressed) {
+      FSDataOutputStream fileOut = fs.create(file, false);
+      return new LineRecordWriter<K, V>(fileOut, keyValueSeparator);
+    } else {
+      FSDataOutputStream fileOut = fs.create(file, false);
+      return new LineRecordWriter<K, V>(new DataOutputStream
+                                        (codec.createOutputStream(fileOut)),
+                                        keyValueSeparator);
+    }
+  }
+  
+  public RecordWriter<K, V> 
+         getRecordWriter(TaskAttemptContext job, int subtaskid
+                         ) throws IOException, InterruptedException {
+    Configuration conf = job.getConfiguration();
+    boolean isCompressed = getCompressOutput(job);
+    String keyValueSeparator= conf.get("mapred.textoutputformat.separator",
+                                       "\t");
+    CompressionCodec codec = null;
+    String extension = Integer.toString(subtaskid);
+    if (isCompressed) {
+      Class<? extends CompressionCodec> codecClass = 
+        getOutputCompressorClass(job, GzipCodec.class);
+      codec = (CompressionCodec) ReflectionUtils.newInstance(codecClass, conf);
+      extension = codec.getDefaultExtension();
+    }
+    Path file = getDefaultWorkFile(job, extension);
+    FileSystem fs = file.getFileSystem(conf);
+    //conf.set("reduce.tmp.output.file."+Integer.toString(subtaskid), file.toString());
     if (!isCompressed) {
       FSDataOutputStream fileOut = fs.create(file, false);
       return new LineRecordWriter<K, V>(fileOut, keyValueSeparator);

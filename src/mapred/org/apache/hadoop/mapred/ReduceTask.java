@@ -21,6 +21,9 @@ package org.apache.hadoop.mapred;
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.File;
+import java.io.FileFilter;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -29,6 +32,8 @@ import java.net.URI;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.net.URLConnection;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.text.DecimalFormat;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -84,6 +89,7 @@ import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.StringUtils;
 
 import org.apache.hadoop.mapred.FileOutputFormat;
+import org.apache.hadoop.mapreduce.lib.output.FileOutputCommitter;
 import org.apache.hadoop.mapreduce.security.SecureShuffleUtils;
 import org.apache.hadoop.metrics2.MetricsException;
 import org.apache.hadoop.metrics2.MetricsRecordBuilder;
@@ -92,6 +98,7 @@ import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.apache.hadoop.metrics2.lib.MetricMutableCounterInt;
 import org.apache.hadoop.metrics2.lib.MetricMutableCounterLong;
 import org.apache.hadoop.metrics2.lib.MetricsRegistry;
+
 
 /** A Reduce task. */
 class ReduceTask extends Task {
@@ -398,9 +405,9 @@ class ReduceTask extends Task {
     // Initialize the codec
     codec = initCodec();
     if (isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/) {
-      System.out.println("reducetask-run: numSubMaps="+numSubMaps);
+      //System.out.println("reducetask-run: numSubMaps="+numSubMaps);
       numSubMaps = job.getNumMapSubTasks();
-      System.out.println("reducetask-run: job.getNumMapSubTasks()="+numSubMaps);
+      //System.out.println("reducetask-run: job.getNumMapSubTasks()="+numSubMaps);
       if (numSubMaps <=0 ) {
     	throw new IOException("reducetask-run: job.getNumMapSubTasks()="+numSubMaps);
       }
@@ -414,16 +421,17 @@ class ReduceTask extends Task {
     if (isSubReduceTaskOn)
     {
     	if (useNewApi) {
-    		throw new IOException("In SubReduceTask, NewApi is not supported");
+    		//throw new IOException("In SubReduceTask, NewApi is not supported");
+    		System.out.println("new api");
     	}
     	
-    	runSubReduceRask(umbilical,job,reporter);
+    	runSubReduceTask(umbilical,job,reporter);
     	done(umbilical, reporter);
     	return;
     }
 
     boolean isLocal = "local".equals(job.get("mapred.job.tracker", "local"));
-    System.out.println("reduce task: isLocal="+isLocal);
+    //System.out.println("reduce task: isLocal="+isLocal);
     if (!isLocal) {
       reduceCopier = new ReduceCopier(umbilical, job, reporter);
       if (!reduceCopier.fetchOutputs()) {
@@ -469,9 +477,9 @@ class ReduceTask extends Task {
     done(umbilical, reporter);
   }
   
-  private void runSubReduceRask(TaskUmbilicalProtocol umbilical, 
+  private void runSubReduceTask(TaskUmbilicalProtocol umbilical, 
   		JobConf job,
-        TaskReporter reporter) throws InterruptedException {
+        TaskReporter reporter) throws InterruptedException, IOException {
 	  List<SubReduceTaskRunner> listSubReduceTask = new ArrayList<SubReduceTaskRunner>();
   	  numSubTaskPerReduce = job.getInt(MRConstants.NUM_OF_SUBTASK_ON_REDUCE,
   			  MRConstants.NUM_OF_SUBTASK_PER_REDUCE) ;
@@ -487,7 +495,155 @@ class ReduceTask extends Task {
       {
       	runner.join();
       }
+      /*
+      boolean useNewApi = job.getUseNewReducer();
+      Path reduceOutputPath;
+      if (useNewApi)
+    	  reduceOutputPath = getNewReduceOutputPath(job);
+      else
+    	  reduceOutputPath = getOldReduceOutputPath(job);
+      FileSystem fs = reduceOutputPath.getFileSystem(job);  
+      String finalName = getOutputName(getPartition());
+      finalName += "final";
+      //Path workPath = FileOutputFormat.getWorkOutputPath(job);
+      Path outputFilePath = new Path(reduceOutputPath, finalName);
+
+		//output = FileOutputFormat.getTaskOutputPath(job, finalName);
+		System.out.println("runsubreducetask, output="+outputFilePath);
+	  File outputFile = new File(outputFilePath.toString());
+	  //outputFile.createNewFile();
+	  
+      MergeDirToFile.mergeDirToFile(new File(reduceOutputPath.toString()), 
+    		  outputFile);*/
   }
+  /*
+  private Path getNewReduceOutputPath(JobConf conf) throws IOException {
+	  String name = conf.get("mapred.output.dir", null);
+	
+	  Path outputPath = (name == null ? null: new Path(name));
+	  
+	  if (outputPath != null) {
+		  Path p = new Path(outputPath,
+	              (org.apache.hadoop.mapreduce.lib.output.FileOutputCommitter.TEMP_DIR_NAME + 
+	            		  Path.SEPARATOR +
+	               "_" + getTaskID().toString()
+	               ));
+		  try {
+		        FileSystem fs = p.getFileSystem(conf);
+		        return p.makeQualified(fs);
+		      } catch (IOException ie) {
+		        LOG.warn(StringUtils .stringifyException(ie));
+		        return p;
+		      }
+	  }
+	  return null;
+	  
+	  //return new Path(outputPath,
+        //      (org.apache.hadoop.mapreduce.lib.output.FileOutputCommitter.TEMP_DIR_NAME + 
+          //  		  Path.SEPARATOR +
+            //   "_" + getTaskID().toString()
+              // )).makeQualified(outputPath.getFileSystem(job));
+  }
+  
+  private Path getOldReduceOutputPath(JobConf conf) throws IOException {
+	  //JobConf conf = taskContext.getJobConf();
+	    Path outputPath = FileOutputFormat.getOutputPath(conf);
+	    //System.out.println("FileOutputCommiter.getTempTaskOutPath:outputpath="+outputPath);
+	    if (outputPath != null) {
+	      Path p = new Path(outputPath,
+	                     (org.apache.hadoop.mapred.FileOutputCommitter.TEMP_DIR_NAME + Path.SEPARATOR +
+	                      "_" + getTaskID().toString()));
+	      try {
+	        FileSystem fs = p.getFileSystem(conf);
+	        return p.makeQualified(fs);
+	      } catch (IOException ie) {
+	        LOG.warn(StringUtils .stringifyException(ie));
+	        return p;
+	      }
+	    }
+	    return null;
+  }
+  
+  static class MergeDirToFile {
+	  private static final int BUFSIZE = 1024 * 1024;  
+	  
+	  private static void mergeFiles(File outFile, List<File> files) {  
+	      FileChannel outChannel = null;  
+	      //System.out.println("Merge " + Arrays.toString(files) + " into " + outFile);  
+	      try {  
+	          outChannel = new FileOutputStream(outFile).getChannel();  
+	          for(File f : files){
+	        	  FileInputStream fin = new FileInputStream(f);
+	              FileChannel fc = fin.getChannel();   
+	              ByteBuffer bb = ByteBuffer.allocate(BUFSIZE);  
+	              while(fc.read(bb) != -1){  
+	                  bb.flip();  
+	                  outChannel.write(bb);  
+	                  bb.clear();  
+	              }  
+	              fc.close();  
+	              fin.close();
+	              if (!f.delete()) {
+	            	  throw new IOException("in mergeDirToFile, delete "+f.getName()+
+	            			  "failed");
+	              }
+	          }  
+	          System.out.println("Merged!! ");  
+	      } catch (IOException ioe) {  
+	          ioe.printStackTrace();  
+	      } finally {  
+	          try {if (outChannel != null) {outChannel.close();}} catch (IOException ignore) {}  
+	      }  
+	  }
+	  
+	  private static ArrayList<File> scanFile(File root) {
+	    ArrayList<File> fileInfo = new ArrayList<File>();
+
+	    File[] files = root.listFiles(new FileFilter() {
+	        public boolean accept(File pathname) {
+	            if (pathname.isDirectory() && pathname.isHidden()) { // delete hidden dir
+	                return false;
+	            }
+
+	            if (pathname.isFile() && pathname.isHidden()) {// delete hidden file
+	                return false;
+	            }
+	            return true;
+	        }
+	    });
+        if (files == null)
+        	return fileInfo;
+	    for (File file : files) {
+	        if (file.isDirectory()) { 
+	            ArrayList<File> ff = scanFile(file);
+	            fileInfo.addAll(ff);
+	        } else {
+	            fileInfo.add(file); 
+	        }
+	    }
+	    ComparatorFileByName comparator=new ComparatorFileByName();
+	    Collections.sort(fileInfo, comparator);
+
+	    return fileInfo;
+	  }
+	  
+	  private static class ComparatorFileByName implements Comparator<File> {
+
+	    @Override
+	    public int compare(File o1, File o2) {
+	      // TODO Auto-generated method stub
+	      
+	      return o1.compareTo(o2);
+	    }
+	    
+	  }
+	  
+	  public static void mergeDirToFile(File dir, File output) {
+	    ArrayList<File> files = scanFile(dir);
+	    mergeFiles(output, files);
+	  }
+	 
+	} */
   
   private class SubReduceTaskRunner extends Thread{
 	private TaskUmbilicalProtocol umbilical;
@@ -513,7 +669,7 @@ class ReduceTask extends Task {
     public void run(){
     	boolean isLocal = "local".equals(job.get("mapred.job.tracker", "local"));
     	boolean useNewApi = job.getUseNewReducer();
-        System.out.println("reduce task: isLocal="+isLocal);
+        //System.out.println("reduce task: isLocal="+isLocal);
         try {
           if (false && isMapOrReduce()) {
             copyPhase = getProgress().addPhase("copy");
@@ -555,8 +711,8 @@ class ReduceTask extends Task {
             RawComparator comparator = job.getOutputValueGroupingComparator();
 
             if (useNewApi) {
-              runNewReducer(job, umbilical, reporter, rIter, comparator, 
-                            keyClass, valueClass);
+              runNewSubReducer(job, umbilical, reporter, rIter, comparator, 
+                            keyClass, valueClass, subReduceTaskId);
             } else {
               runOldSubReducer(job, umbilical, reporter, rIter, comparator, 
                             keyClass, valueClass, subReduceTaskId);
@@ -789,12 +945,33 @@ class ReduceTask extends Task {
       fsStats = matchedStats;
 
       long bytesOutPrev = getOutputBytes(fsStats);
-      this.real = (org.apache.hadoop.mapreduce.RecordWriter<K, V>) outputFormat
-          .getRecordWriter(taskContext);
+      this.real = (org.apache.hadoop.mapreduce.RecordWriter<K, V>) outputFormat 
+          .getRecordWriter(taskContext); //textoutputformat
       long bytesOutCurr = getOutputBytes(fsStats);
       fileOutputByteCounter.increment(bytesOutCurr - bytesOutPrev);
     }
+    NewTrackingRecordWriter(org.apache.hadoop.mapreduce.Counter recordCounter,
+        JobConf job, TaskReporter reporter,
+        org.apache.hadoop.mapreduce.TaskAttemptContext taskContext, int subtaskid)
+        throws InterruptedException, IOException {
+      this.outputRecordCounter = recordCounter;
+      this.fileOutputByteCounter = reporter
+          .getCounter(org.apache.hadoop.mapreduce.lib.output.FileOutputFormat.Counter.BYTES_WRITTEN);
+      Statistics matchedStats = null;
+      // TaskAttemptContext taskContext = new TaskAttemptContext(job,
+      // getTaskID());
+      if (outputFormat instanceof org.apache.hadoop.mapreduce.lib.output.FileOutputFormat) {
+        matchedStats = getFsStatistics(org.apache.hadoop.mapreduce.lib.output.FileOutputFormat
+            .getOutputPath(taskContext), taskContext.getConfiguration());
+      }
+      fsStats = matchedStats;
 
+      long bytesOutPrev = getOutputBytes(fsStats);
+      this.real = (org.apache.hadoop.mapreduce.RecordWriter<K, V>) outputFormat 
+          .getRecordWriter(taskContext, subtaskid); //textoutputformat
+      long bytesOutCurr = getOutputBytes(fsStats);
+      fileOutputByteCounter.increment(bytesOutCurr - bytesOutPrev);
+    }
     @Override
     public void close(TaskAttemptContext context) throws IOException,
     InterruptedException {
@@ -875,7 +1052,63 @@ class ReduceTask extends Task {
       trackedRW.close(reducerContext);
     }
   }
-
+  private <INKEY,INVALUE,OUTKEY,OUTVALUE>
+  void runNewSubReducer(JobConf job,
+                     final TaskUmbilicalProtocol umbilical,
+                     final TaskReporter reporter,
+                     RawKeyValueIterator rIter,
+                     RawComparator<INKEY> comparator,
+                     Class<INKEY> keyClass,
+                     Class<INVALUE> valueClass,
+                     int subtaskid
+                     ) throws IOException,InterruptedException, 
+                              ClassNotFoundException {
+    // wrap value iterator to report progress.
+    final RawKeyValueIterator rawIter = rIter;
+    rIter = new RawKeyValueIterator() {
+      public void close() throws IOException {
+        rawIter.close();
+      }
+      public DataInputBuffer getKey() throws IOException {
+        return rawIter.getKey();
+      }
+      public Progress getProgress() {
+        return rawIter.getProgress();
+      }
+      public DataInputBuffer getValue() throws IOException {
+        return rawIter.getValue();
+      }
+      public boolean next() throws IOException {
+        boolean ret = rawIter.next();
+        reducePhase.set(rawIter.getProgress().get());
+        reporter.progress();
+        return ret;
+      }
+    };
+    // make a task context so we can get the classes
+    org.apache.hadoop.mapreduce.TaskAttemptContext taskContext =
+      new org.apache.hadoop.mapreduce.TaskAttemptContext(job, getTaskID());
+    // make a reducer
+    org.apache.hadoop.mapreduce.Reducer<INKEY,INVALUE,OUTKEY,OUTVALUE> reducer =
+      (org.apache.hadoop.mapreduce.Reducer<INKEY,INVALUE,OUTKEY,OUTVALUE>)
+        ReflectionUtils.newInstance(taskContext.getReducerClass(), job);
+     org.apache.hadoop.mapreduce.RecordWriter<OUTKEY,OUTVALUE> trackedRW = 
+       new NewTrackingRecordWriter<OUTKEY, OUTVALUE>(reduceOutputCounter,
+         job, reporter, taskContext, subtaskid);
+    job.setBoolean("mapred.skip.on", isSkipping());
+    org.apache.hadoop.mapreduce.Reducer.Context 
+         reducerContext = createReduceContext(reducer, job, getTaskID(),
+                                               rIter, reduceInputKeyCounter,
+                                               reduceInputValueCounter, 
+                                               trackedRW, committer,
+                                               reporter, comparator, keyClass,
+                                               valueClass);
+    try {
+      reducer.run(reducerContext);
+    } finally {
+      trackedRW.close(reducerContext);
+    }
+  }
   private static enum CopyOutputErrorType {
     NO_ERROR,
     READ_ERROR,
@@ -1651,10 +1884,10 @@ class ReduceTask extends Task {
         // else, we will check the localFS to find a suitable final location
         // for this path
         TaskAttemptID reduceId = reduceTask.getTaskID();
-        Path filename =
+        Path filename;/* =
             new Path(String.format(
                 MapOutputFile.REDUCE_INPUT_FILE_FORMAT_STRING,
-                TaskTracker.OUTPUT, loc.getTaskId().getId())); //racecondition
+                TaskTracker.OUTPUT, loc.getTaskId().getId()));*/ //racecondition
         
         if (subReduceTaskId == -1)
         	filename = new Path(String.format(
@@ -1671,7 +1904,7 @@ class ReduceTask extends Task {
         //  tmpMapOutput = new Path(filename+"-"+id);
         //else
         //  tmpMapOutput = new Path(filename+"-"+subReduceTaskId+"-"+id);
-        System.out.println("MapOutputCopier.copyOutput:tmpMapOutput="+tmpMapOutput);
+        //System.out.println("MapOutputCopier.copyOutput:tmpMapOutput="+tmpMapOutput);
         // Copy the map output
         MapOutput mapOutput ;
         if (subReduceTaskId == -1)
@@ -2115,7 +2348,7 @@ class ReduceTask extends Task {
                         conf, localFileSys.makeQualified(localFilename), 
                         mapOutputLength);
 
-        System.out.println("shuffletodisk:localfilename="+localFilename+" qualifid="+localFileSys.makeQualified(localFilename));
+        //System.out.println("shuffletodisk:localfilename="+localFilename+" qualifid="+localFileSys.makeQualified(localFilename));
         // Copy data to local-disk
         OutputStream output = null;
         long bytesRead = 0;
@@ -3037,8 +3270,8 @@ class ReduceTask extends Task {
               lDirAlloc.getLocalPathForWrite(mapFiles.get(0).toString(), 
                                              approxOutputSize, conf)
               .suffix(".merged");
-            System.out.println("reduceCopier.LocalFSMerger:outputpath="+outputPath+
-            		" mapFiles.get(0)="+mapFiles.get(0).toString());
+            //System.out.println("reduceCopier.LocalFSMerger:outputpath="+outputPath+
+            //		" mapFiles.get(0)="+mapFiles.get(0).toString());
             Writer writer = 
               new Writer(conf,rfs, outputPath, 
                          conf.getMapOutputKeyClass(), 

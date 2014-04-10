@@ -79,6 +79,51 @@ public class SequenceFileOutputFormat <K,V> extends FileOutputFormat<K, V> {
         }
       };
   }
+  
+  public RecordWriter<K, V> 
+  getRecordWriter(TaskAttemptContext context, int subtaskid
+                  ) throws IOException, InterruptedException {
+Configuration conf = context.getConfiguration();
+
+CompressionCodec codec = null;
+CompressionType compressionType = CompressionType.NONE;
+if (getCompressOutput(context)) {
+// find the kind of compression to do
+compressionType = getOutputCompressionType(context);
+
+// find the right codec
+Class<?> codecClass = getOutputCompressorClass(context, 
+                                              DefaultCodec.class);
+codec = (CompressionCodec) 
+ ReflectionUtils.newInstance(codecClass, conf);
+}
+// get the path of the temporary output file 
+Path file = getDefaultWorkFile(context, Integer.toString(subtaskid));
+FileSystem fs = file.getFileSystem(conf);
+//conf.set("reduce.tmp.output.file."+Integer.toString(subtaskid), file.toString());
+final SequenceFile.Writer out = 
+SequenceFile.createWriter(fs, conf, file,
+                         context.getOutputKeyClass(),
+                         context.getOutputValueClass(),
+                         compressionType,
+                         codec,
+                         context);
+
+return new RecordWriter<K, V>() {
+
+ public void write(K key, V value)
+   throws IOException {
+
+   out.append(key, value);
+ }
+
+ public void close(TaskAttemptContext context) throws IOException { 
+   out.close();
+ }
+};
+}
+  
+
 
   /**
    * Get the {@link CompressionType} for the output {@link SequenceFile}.

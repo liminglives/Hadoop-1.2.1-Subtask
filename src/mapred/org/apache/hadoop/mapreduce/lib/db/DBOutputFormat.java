@@ -185,6 +185,9 @@ extends OutputFormat<K,V> {
       throw new IOException(ex.getMessage());
     }
   }
+  public RecordWriter<K, V> getRecordWriter(TaskAttemptContext context, int subtaskid) 
+  throws IOException {
+	return null;}
 
   /**
    * Initializes the reduce-part of the job with 

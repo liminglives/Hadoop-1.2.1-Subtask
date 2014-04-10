@@ -1,0 +1,699 @@
+diff --git a/src/contrib/gridmix/src/java/org/apache/hadoop/mapred/gridmix/GenerateData.java b/src/contrib/gridmix/src/java/org/apache/hadoop/mapred/gridmix/GenerateData.java
+index 8a4646b..336fefb 100644
+--- a/src/contrib/gridmix/src/java/org/apache/hadoop/mapred/gridmix/GenerateData.java
++++ b/src/contrib/gridmix/src/java/org/apache/hadoop/mapred/gridmix/GenerateData.java
+@@ -377,6 +377,12 @@ class GenerateData extends GridmixJob {
+       return new ChunkWriter(getDefaultWorkFile(job, ""),
+           job.getConfiguration());
+     }
++    public RecordWriter<NullWritable,BytesWritable> getRecordWriter(
++            TaskAttemptContext job, int subtaskid) throws IOException {
++          
++          return new ChunkWriter(getDefaultWorkFile(job, Integer.toString(subtaskid)),
++              job.getConfiguration());
++        }
+ 
+     static class ChunkWriter extends RecordWriter<NullWritable,BytesWritable> {
+       private final Path outDir;
+diff --git a/src/contrib/gridmix/src/java/org/apache/hadoop/mapred/gridmix/GridmixJob.java b/src/contrib/gridmix/src/java/org/apache/hadoop/mapred/gridmix/GridmixJob.java
+index 4a084e3..b80efe4 100644
+--- a/src/contrib/gridmix/src/java/org/apache/hadoop/mapred/gridmix/GridmixJob.java
++++ b/src/contrib/gridmix/src/java/org/apache/hadoop/mapred/gridmix/GridmixJob.java
+@@ -533,5 +533,29 @@ abstract class GridmixJob implements Callable<Job>, Delayed {
+         }
+       };
+     }
++    
++    public RecordWriter<K,GridmixRecord> getRecordWriter(
++            TaskAttemptContext job, int subtaskid) throws IOException {
++
++          Path file = getDefaultWorkFile(job, Integer.toString(subtaskid));
++          final DataOutputStream fileOut;
++
++          fileOut = 
++            new DataOutputStream(CompressionEmulationUtil
++                .getPossiblyCompressedOutputStream(file, job.getConfiguration()));
++
++          return new RecordWriter<K,GridmixRecord>() {
++            @Override
++            public void write(K ignored, GridmixRecord value)
++                throws IOException {
++              // Let the Gridmix record fill itself.
++              value.write(fileOut);
++            }
++            @Override
++            public void close(TaskAttemptContext ctxt) throws IOException {
++              fileOut.close();
++            }
++          };
++        }
+   }
+ }
+diff --git a/src/mapred/org/apache/hadoop/mapred/FileOutputCommitter.java b/src/mapred/org/apache/hadoop/mapred/FileOutputCommitter.java
+index c3259cc..86f1450 100644
+--- a/src/mapred/org/apache/hadoop/mapred/FileOutputCommitter.java
++++ b/src/mapred/org/apache/hadoop/mapred/FileOutputCommitter.java
+@@ -227,7 +227,7 @@ public class FileOutputCommitter extends OutputCommitter {
+   Path getTempTaskOutputPath(TaskAttemptContext taskContext) {
+     JobConf conf = taskContext.getJobConf();
+     Path outputPath = FileOutputFormat.getOutputPath(conf);
+-    System.out.println("FileOutputCommiter.getTempTaskOutPath:outputpath="+outputPath);
++    //System.out.println("FileOutputCommiter.getTempTaskOutPath:outputpath="+outputPath);
+     if (outputPath != null) {
+       Path p = new Path(outputPath,
+                      (FileOutputCommitter.TEMP_DIR_NAME + Path.SEPARATOR +
+diff --git a/src/mapred/org/apache/hadoop/mapred/ReduceTask.java b/src/mapred/org/apache/hadoop/mapred/ReduceTask.java
+index 88aab38..e8aa880 100644
+--- a/src/mapred/org/apache/hadoop/mapred/ReduceTask.java
++++ b/src/mapred/org/apache/hadoop/mapred/ReduceTask.java
+@@ -21,6 +21,9 @@ package org.apache.hadoop.mapred;
+ import java.io.DataInput;
+ import java.io.DataOutput;
+ import java.io.File;
++import java.io.FileFilter;
++import java.io.FileInputStream;
++import java.io.FileOutputStream;
+ import java.io.IOException;
+ import java.io.InputStream;
+ import java.io.OutputStream;
+@@ -29,6 +32,8 @@ import java.net.URI;
+ import java.net.URL;
+ import java.net.URLClassLoader;
+ import java.net.URLConnection;
++import java.nio.ByteBuffer;
++import java.nio.channels.FileChannel;
+ import java.text.DecimalFormat;
+ import java.util.ArrayList;
+ import java.util.Collections;
+@@ -84,6 +89,7 @@ import org.apache.hadoop.util.ReflectionUtils;
+ import org.apache.hadoop.util.StringUtils;
+ 
+ import org.apache.hadoop.mapred.FileOutputFormat;
++import org.apache.hadoop.mapreduce.lib.output.FileOutputCommitter;
+ import org.apache.hadoop.mapreduce.security.SecureShuffleUtils;
+ import org.apache.hadoop.metrics2.MetricsException;
+ import org.apache.hadoop.metrics2.MetricsRecordBuilder;
+@@ -93,6 +99,7 @@ import org.apache.hadoop.metrics2.lib.MetricMutableCounterInt;
+ import org.apache.hadoop.metrics2.lib.MetricMutableCounterLong;
+ import org.apache.hadoop.metrics2.lib.MetricsRegistry;
+ 
++
+ /** A Reduce task. */
+ class ReduceTask extends Task {
+ 
+@@ -414,10 +421,11 @@ class ReduceTask extends Task {
+     if (isSubReduceTaskOn)
+     {
+     	if (useNewApi) {
+-    		throw new IOException("In SubReduceTask, NewApi is not supported");
++    		//throw new IOException("In SubReduceTask, NewApi is not supported");
++    		System.out.println("new api");
+     	}
+     	
+-    	runSubReduceRask(umbilical,job,reporter);
++    	runSubReduceTask(umbilical,job,reporter);
+     	done(umbilical, reporter);
+     	return;
+     }
+@@ -469,9 +477,9 @@ class ReduceTask extends Task {
+     done(umbilical, reporter);
+   }
+   
+-  private void runSubReduceRask(TaskUmbilicalProtocol umbilical, 
++  private void runSubReduceTask(TaskUmbilicalProtocol umbilical, 
+   		JobConf job,
+-        TaskReporter reporter) throws InterruptedException {
++        TaskReporter reporter) throws InterruptedException, IOException {
+ 	  List<SubReduceTaskRunner> listSubReduceTask = new ArrayList<SubReduceTaskRunner>();
+   	  numSubTaskPerReduce = job.getInt(MRConstants.NUM_OF_SUBTASK_ON_REDUCE,
+   			  MRConstants.NUM_OF_SUBTASK_PER_REDUCE) ;
+@@ -487,8 +495,169 @@ class ReduceTask extends Task {
+       {
+       	runner.join();
+       }
++      
++      boolean useNewApi = job.getUseNewReducer();
++      Path reduceOutputPath;
++      if (useNewApi)
++    	  reduceOutputPath = getNewReduceOutputPath(job);
++      else
++    	  reduceOutputPath = getOldReduceOutputPath(job);
++      FileSystem fs = reduceOutputPath.getFileSystem(job);  
++      String finalName = getOutputName(getPartition());
++      finalName += "final";
++      //Path workPath = FileOutputFormat.getWorkOutputPath(job);
++      Path outputFilePath = new Path(reduceOutputPath, finalName);
++
++		//output = FileOutputFormat.getTaskOutputPath(job, finalName);
++		System.out.println("runsubreducetask, output="+outputFilePath);
++	  File outputFile = new File(outputFilePath.toString());
++	  //outputFile.createNewFile();
++	  
++      MergeDirToFile.mergeDirToFile(new File(reduceOutputPath.toString()), 
++    		  outputFile);
+   }
+   
++  private Path getNewReduceOutputPath(JobConf conf) throws IOException {
++	  String name = conf.get("mapred.output.dir", null);
++	  //name == null ? null: new Path(name);
++	  /*
++	  if (name == null)
++		  throw new IOException("mapred.output.dir"+ 
++		  "not found");*/
++	  Path outputPath = (name == null ? null: new Path(name));
++	  
++	  if (outputPath != null) {
++		  Path p = new Path(outputPath,
++	              (org.apache.hadoop.mapreduce.lib.output.FileOutputCommitter.TEMP_DIR_NAME + 
++	            		  Path.SEPARATOR +
++	               "_" + getTaskID().toString()
++	               ));
++		  try {
++		        FileSystem fs = p.getFileSystem(conf);
++		        return p.makeQualified(fs);
++		      } catch (IOException ie) {
++		        LOG.warn(StringUtils .stringifyException(ie));
++		        return p;
++		      }
++	  }
++	  return null;
++	  /*
++	  return new Path(outputPath,
++              (org.apache.hadoop.mapreduce.lib.output.FileOutputCommitter.TEMP_DIR_NAME + 
++            		  Path.SEPARATOR +
++               "_" + getTaskID().toString()
++               )).makeQualified(outputPath.getFileSystem(job));*/
++  }
++  
++  private Path getOldReduceOutputPath(JobConf conf) throws IOException {
++	  //JobConf conf = taskContext.getJobConf();
++	    Path outputPath = FileOutputFormat.getOutputPath(conf);
++	    //System.out.println("FileOutputCommiter.getTempTaskOutPath:outputpath="+outputPath);
++	    if (outputPath != null) {
++	      Path p = new Path(outputPath,
++	                     (org.apache.hadoop.mapred.FileOutputCommitter.TEMP_DIR_NAME + Path.SEPARATOR +
++	                      "_" + getTaskID().toString()));
++	      try {
++	        FileSystem fs = p.getFileSystem(conf);
++	        return p.makeQualified(fs);
++	      } catch (IOException ie) {
++	        LOG.warn(StringUtils .stringifyException(ie));
++	        return p;
++	      }
++	    }
++	    return null;
++  }
++  
++  static class MergeDirToFile {
++	  private static final int BUFSIZE = 1024 * 1024;  
++	  
++	  private static void mergeFiles(File outFile, List<File> files) {  
++	      FileChannel outChannel = null;  
++	      //System.out.println("Merge " + Arrays.toString(files) + " into " + outFile);  
++	      try {  
++	          outChannel = new FileOutputStream(outFile).getChannel();  
++	          for(File f : files){
++	        	  FileInputStream fin = new FileInputStream(f);
++	              FileChannel fc = fin.getChannel();   
++	              ByteBuffer bb = ByteBuffer.allocate(BUFSIZE);  
++	              while(fc.read(bb) != -1){  
++	                  bb.flip();  
++	                  outChannel.write(bb);  
++	                  bb.clear();  
++	              }  
++	              fc.close();  
++	              fin.close();
++	              if (!f.delete()) {
++	            	  throw new IOException("in mergeDirToFile, delete "+f.getName()+
++	            			  "failed");
++	              }
++	          }  
++	          System.out.println("Merged!! ");  
++	      } catch (IOException ioe) {  
++	          ioe.printStackTrace();  
++	      } finally {  
++	          try {if (outChannel != null) {outChannel.close();}} catch (IOException ignore) {}  
++	      }  
++	  }
++	  
++	  private static ArrayList<File> scanFile(File root) {
++	    ArrayList<File> fileInfo = new ArrayList<File>();
++
++	    File[] files = root.listFiles(new FileFilter() {
++	        public boolean accept(File pathname) {
++	            if (pathname.isDirectory() && pathname.isHidden()) { // delete hidden dir
++	                return false;
++	            }
++
++	            if (pathname.isFile() && pathname.isHidden()) {// delete hidden file
++	                return false;
++	            }
++	            return true;
++	        }
++	    });
++        if (files == null)
++        	return fileInfo;
++	    for (File file : files) {
++	        if (file.isDirectory()) { 
++	            ArrayList<File> ff = scanFile(file);
++	            fileInfo.addAll(ff);
++	        } else {
++	            fileInfo.add(file); 
++	        }
++	    }
++	    ComparatorFileByName comparator=new ComparatorFileByName();
++	    Collections.sort(fileInfo, comparator);
++
++	    return fileInfo;
++	  }
++	  
++	  private static class ComparatorFileByName implements Comparator<File> {
++
++	    @Override
++	    public int compare(File o1, File o2) {
++	      // TODO Auto-generated method stub
++	      
++	      return o1.compareTo(o2);
++	    }
++	    
++	  }
++	  
++	  public static void mergeDirToFile(File dir, File output) {
++	    ArrayList<File> files = scanFile(dir);
++	    mergeFiles(output, files);
++	  }
++	 
++	  /*  
++	  public static void main(String[] args) {  
++	      //mergeFiles("outputfile", new String[]{"D:/in_1", "D:/in_2.txt", "D:/in_3.txt"});
++	    File root = new File("dir/subblk_2342342432");
++	    ArrayList<File> files = scanFile(root);
++	    for (File f : files)
++	      System.out.println(f);
++	    mergeFiles(new File("outputFile"), files);
++	  } */ 
++	}
++  
+   private class SubReduceTaskRunner extends Thread{
+ 	private TaskUmbilicalProtocol umbilical;
+ 	private JobConf job;
+@@ -555,8 +724,8 @@ class ReduceTask extends Task {
+             RawComparator comparator = job.getOutputValueGroupingComparator();
+ 
+             if (useNewApi) {
+-              runNewReducer(job, umbilical, reporter, rIter, comparator, 
+-                            keyClass, valueClass);
++              runNewSubReducer(job, umbilical, reporter, rIter, comparator, 
++                            keyClass, valueClass, subReduceTaskId);
+             } else {
+               runOldSubReducer(job, umbilical, reporter, rIter, comparator, 
+                             keyClass, valueClass, subReduceTaskId);
+@@ -789,12 +958,33 @@ class ReduceTask extends Task {
+       fsStats = matchedStats;
+ 
+       long bytesOutPrev = getOutputBytes(fsStats);
+-      this.real = (org.apache.hadoop.mapreduce.RecordWriter<K, V>) outputFormat
+-          .getRecordWriter(taskContext);
++      this.real = (org.apache.hadoop.mapreduce.RecordWriter<K, V>) outputFormat 
++          .getRecordWriter(taskContext); //textoutputformat
+       long bytesOutCurr = getOutputBytes(fsStats);
+       fileOutputByteCounter.increment(bytesOutCurr - bytesOutPrev);
+     }
++    NewTrackingRecordWriter(org.apache.hadoop.mapreduce.Counter recordCounter,
++        JobConf job, TaskReporter reporter,
++        org.apache.hadoop.mapreduce.TaskAttemptContext taskContext, int subtaskid)
++        throws InterruptedException, IOException {
++      this.outputRecordCounter = recordCounter;
++      this.fileOutputByteCounter = reporter
++          .getCounter(org.apache.hadoop.mapreduce.lib.output.FileOutputFormat.Counter.BYTES_WRITTEN);
++      Statistics matchedStats = null;
++      // TaskAttemptContext taskContext = new TaskAttemptContext(job,
++      // getTaskID());
++      if (outputFormat instanceof org.apache.hadoop.mapreduce.lib.output.FileOutputFormat) {
++        matchedStats = getFsStatistics(org.apache.hadoop.mapreduce.lib.output.FileOutputFormat
++            .getOutputPath(taskContext), taskContext.getConfiguration());
++      }
++      fsStats = matchedStats;
+ 
++      long bytesOutPrev = getOutputBytes(fsStats);
++      this.real = (org.apache.hadoop.mapreduce.RecordWriter<K, V>) outputFormat 
++          .getRecordWriter(taskContext, subtaskid); //textoutputformat
++      long bytesOutCurr = getOutputBytes(fsStats);
++      fileOutputByteCounter.increment(bytesOutCurr - bytesOutPrev);
++    }
+     @Override
+     public void close(TaskAttemptContext context) throws IOException,
+     InterruptedException {
+@@ -875,7 +1065,63 @@ class ReduceTask extends Task {
+       trackedRW.close(reducerContext);
+     }
+   }
+-
++  private <INKEY,INVALUE,OUTKEY,OUTVALUE>
++  void runNewSubReducer(JobConf job,
++                     final TaskUmbilicalProtocol umbilical,
++                     final TaskReporter reporter,
++                     RawKeyValueIterator rIter,
++                     RawComparator<INKEY> comparator,
++                     Class<INKEY> keyClass,
++                     Class<INVALUE> valueClass,
++                     int subtaskid
++                     ) throws IOException,InterruptedException, 
++                              ClassNotFoundException {
++    // wrap value iterator to report progress.
++    final RawKeyValueIterator rawIter = rIter;
++    rIter = new RawKeyValueIterator() {
++      public void close() throws IOException {
++        rawIter.close();
++      }
++      public DataInputBuffer getKey() throws IOException {
++        return rawIter.getKey();
++      }
++      public Progress getProgress() {
++        return rawIter.getProgress();
++      }
++      public DataInputBuffer getValue() throws IOException {
++        return rawIter.getValue();
++      }
++      public boolean next() throws IOException {
++        boolean ret = rawIter.next();
++        reducePhase.set(rawIter.getProgress().get());
++        reporter.progress();
++        return ret;
++      }
++    };
++    // make a task context so we can get the classes
++    org.apache.hadoop.mapreduce.TaskAttemptContext taskContext =
++      new org.apache.hadoop.mapreduce.TaskAttemptContext(job, getTaskID());
++    // make a reducer
++    org.apache.hadoop.mapreduce.Reducer<INKEY,INVALUE,OUTKEY,OUTVALUE> reducer =
++      (org.apache.hadoop.mapreduce.Reducer<INKEY,INVALUE,OUTKEY,OUTVALUE>)
++        ReflectionUtils.newInstance(taskContext.getReducerClass(), job);
++     org.apache.hadoop.mapreduce.RecordWriter<OUTKEY,OUTVALUE> trackedRW = 
++       new NewTrackingRecordWriter<OUTKEY, OUTVALUE>(reduceOutputCounter,
++         job, reporter, taskContext, subtaskid);
++    job.setBoolean("mapred.skip.on", isSkipping());
++    org.apache.hadoop.mapreduce.Reducer.Context 
++         reducerContext = createReduceContext(reducer, job, getTaskID(),
++                                               rIter, reduceInputKeyCounter,
++                                               reduceInputValueCounter, 
++                                               trackedRW, committer,
++                                               reporter, comparator, keyClass,
++                                               valueClass);
++    try {
++      reducer.run(reducerContext);
++    } finally {
++      trackedRW.close(reducerContext);
++    }
++  }
+   private static enum CopyOutputErrorType {
+     NO_ERROR,
+     READ_ERROR,
+diff --git a/src/mapred/org/apache/hadoop/mapreduce/OutputFormat.java b/src/mapred/org/apache/hadoop/mapreduce/OutputFormat.java
+index 66a7253..84b02b1 100644
+--- a/src/mapred/org/apache/hadoop/mapreduce/OutputFormat.java
++++ b/src/mapred/org/apache/hadoop/mapreduce/OutputFormat.java
+@@ -53,6 +53,10 @@ public abstract class OutputFormat<K, V> {
+   public abstract RecordWriter<K, V> 
+     getRecordWriter(TaskAttemptContext context
+                     ) throws IOException, InterruptedException;
++  
++  public abstract RecordWriter<K, V> 
++  getRecordWriter(TaskAttemptContext context, int subtaskid
++                  ) throws IOException, InterruptedException;
+ 
+   /** 
+    * Check for validity of the output-specification for the job.
+diff --git a/src/mapred/org/apache/hadoop/mapreduce/lib/db/DBOutputFormat.java b/src/mapred/org/apache/hadoop/mapreduce/lib/db/DBOutputFormat.java
+index 2e3a9d8..72bd007 100644
+--- a/src/mapred/org/apache/hadoop/mapreduce/lib/db/DBOutputFormat.java
++++ b/src/mapred/org/apache/hadoop/mapreduce/lib/db/DBOutputFormat.java
+@@ -185,6 +185,9 @@ extends OutputFormat<K,V> {
+       throw new IOException(ex.getMessage());
+     }
+   }
++  public RecordWriter<K, V> getRecordWriter(TaskAttemptContext context, int subtaskid) 
++  throws IOException {
++	return null;}
+ 
+   /**
+    * Initializes the reduce-part of the job with 
+diff --git a/src/mapred/org/apache/hadoop/mapreduce/lib/output/FileOutputCommitter.java b/src/mapred/org/apache/hadoop/mapreduce/lib/output/FileOutputCommitter.java
+index 99dd471..de536a3 100644
+--- a/src/mapred/org/apache/hadoop/mapreduce/lib/output/FileOutputCommitter.java
++++ b/src/mapred/org/apache/hadoop/mapreduce/lib/output/FileOutputCommitter.java
+@@ -44,7 +44,7 @@ public class FileOutputCommitter extends OutputCommitter {
+   /**
+    * Temporary directory name 
+    */
+-  protected static final String TEMP_DIR_NAME = "_temporary";
++  public static final String TEMP_DIR_NAME = "_temporary";
+   public static final String SUCCEEDED_FILE_NAME = "_SUCCESS";
+   static final String SUCCESSFUL_JOB_OUTPUT_DIR_MARKER =
+     "mapreduce.fileoutputcommitter.marksuccessfuljobs";
+diff --git a/src/mapred/org/apache/hadoop/mapreduce/lib/output/FileOutputFormat.java b/src/mapred/org/apache/hadoop/mapreduce/lib/output/FileOutputFormat.java
+index b09ec20..7fc9a89 100644
+--- a/src/mapred/org/apache/hadoop/mapreduce/lib/output/FileOutputFormat.java
++++ b/src/mapred/org/apache/hadoop/mapreduce/lib/output/FileOutputFormat.java
+@@ -119,6 +119,10 @@ public abstract class FileOutputFormat<K, V> extends OutputFormat<K, V> {
+   public abstract RecordWriter<K, V> 
+      getRecordWriter(TaskAttemptContext job
+                      ) throws IOException, InterruptedException;
++  
++  public abstract RecordWriter<K, V> 
++  getRecordWriter(TaskAttemptContext context, int subtaskid
++                  ) throws IOException, InterruptedException;
+ 
+   public void checkOutputSpecs(JobContext job
+                                ) throws FileAlreadyExistsException, IOException{
+diff --git a/src/mapred/org/apache/hadoop/mapreduce/lib/output/FilterOutputFormat.java b/src/mapred/org/apache/hadoop/mapreduce/lib/output/FilterOutputFormat.java
+index 9d498d7..ebdc33f 100644
+--- a/src/mapred/org/apache/hadoop/mapreduce/lib/output/FilterOutputFormat.java
++++ b/src/mapred/org/apache/hadoop/mapreduce/lib/output/FilterOutputFormat.java
+@@ -54,6 +54,10 @@ public class FilterOutputFormat <K,V> extends OutputFormat<K, V> {
+   throws IOException, InterruptedException {
+     return getBaseOut().getRecordWriter(context);
+   }
++  public RecordWriter<K, V> getRecordWriter(TaskAttemptContext context, int subtaskid) 
++  throws IOException, InterruptedException {
++    return getBaseOut().getRecordWriter(context, subtaskid);
++  }
+ 
+   @Override
+   public void checkOutputSpecs(JobContext context) 
+diff --git a/src/mapred/org/apache/hadoop/mapreduce/lib/output/NullOutputFormat.java b/src/mapred/org/apache/hadoop/mapreduce/lib/output/NullOutputFormat.java
+index b61c3a3..a0461d1 100644
+--- a/src/mapred/org/apache/hadoop/mapreduce/lib/output/NullOutputFormat.java
++++ b/src/mapred/org/apache/hadoop/mapreduce/lib/output/NullOutputFormat.java
+@@ -37,7 +37,13 @@ public class NullOutputFormat<K, V> extends OutputFormat<K, V> {
+         public void close(TaskAttemptContext context) { }
+       };
+   }
+-  
++  public RecordWriter<K, V> 
++         getRecordWriter(TaskAttemptContext contextm, int subtaskid) {
++    return new RecordWriter<K, V>(){
++        public void write(K key, V value) { }
++        public void close(TaskAttemptContext context) { }
++      };
++  }
+   @Override
+   public void checkOutputSpecs(JobContext context) { }
+   
+diff --git a/src/mapred/org/apache/hadoop/mapreduce/lib/output/SequenceFileAsBinaryOutputFormat.java b/src/mapred/org/apache/hadoop/mapreduce/lib/output/SequenceFileAsBinaryOutputFormat.java
+index 43f6933..20deee3 100644
+--- a/src/mapred/org/apache/hadoop/mapreduce/lib/output/SequenceFileAsBinaryOutputFormat.java
++++ b/src/mapred/org/apache/hadoop/mapreduce/lib/output/SequenceFileAsBinaryOutputFormat.java
+@@ -158,7 +158,27 @@ public class SequenceFileAsBinaryOutputFormat
+       }
+     };
+   }
++  public RecordWriter<BytesWritable, BytesWritable> getRecordWriter(
++      TaskAttemptContext context, int subtaskid) throws IOException {
++    final SequenceFile.Writer out = getSequenceWriter(context, subtaskid,
++      getSequenceFileOutputKeyClass(context),
++      getSequenceFileOutputValueClass(context)); 
++
++    return new RecordWriter<BytesWritable, BytesWritable>() {
++      private WritableValueBytes wvaluebytes = new WritableValueBytes();
+ 
++      public void write(BytesWritable bkey, BytesWritable bvalue)
++        throws IOException {
++        wvaluebytes.reset(bvalue);
++        out.appendRaw(bkey.getBytes(), 0, bkey.getLength(), wvaluebytes);
++        wvaluebytes.reset(null);
++      }
++
++      public void close(TaskAttemptContext context) throws IOException { 
++        out.close();
++      }
++    };
++  }
+   protected SequenceFile.Writer getSequenceWriter(TaskAttemptContext context,
+       Class<?> keyClass, Class<?> valueClass)
+       throws IOException {
+@@ -185,7 +205,33 @@ public class SequenceFileAsBinaryOutputFormat
+              codec,
+              context);
+   }
++  protected SequenceFile.Writer getSequenceWriter(TaskAttemptContext context, int subtaskid,
++      Class<?> keyClass, Class<?> valueClass)
++      throws IOException {
++    Configuration conf = context.getConfiguration();
+ 
++    CompressionCodec codec = null;
++    CompressionType compressionType = CompressionType.NONE;
++    if (getCompressOutput(context)) {
++      // find the kind of compression to do
++      compressionType = getOutputCompressionType(context);
++      // find the right codec
++      Class<?> codecClass = getOutputCompressorClass(context,
++                                                     DefaultCodec.class);
++      codec = (CompressionCodec)
++        ReflectionUtils.newInstance(codecClass, conf);
++    }
++    // get the path of the temporary output file
++    Path file = getDefaultWorkFile(context, Integer.toString(subtaskid));
++    FileSystem fs = file.getFileSystem(conf);
++    conf.set("reduce.tmp.output.file."+Integer.toString(subtaskid), file.toString());
++    return SequenceFile.createWriter(fs, conf, file,
++             keyClass,
++             valueClass,
++             compressionType,
++             codec,
++             context);
++  }
+   @Override 
+   public void checkOutputSpecs(JobContext job) throws IOException {
+     super.checkOutputSpecs(job);
+diff --git a/src/mapred/org/apache/hadoop/mapreduce/lib/output/SequenceFileOutputFormat.java b/src/mapred/org/apache/hadoop/mapreduce/lib/output/SequenceFileOutputFormat.java
+index 607d704..d132c48 100644
+--- a/src/mapred/org/apache/hadoop/mapreduce/lib/output/SequenceFileOutputFormat.java
++++ b/src/mapred/org/apache/hadoop/mapreduce/lib/output/SequenceFileOutputFormat.java
+@@ -79,6 +79,51 @@ public class SequenceFileOutputFormat <K,V> extends FileOutputFormat<K, V> {
+         }
+       };
+   }
++  
++  public RecordWriter<K, V> 
++  getRecordWriter(TaskAttemptContext context, int subtaskid
++                  ) throws IOException, InterruptedException {
++Configuration conf = context.getConfiguration();
++
++CompressionCodec codec = null;
++CompressionType compressionType = CompressionType.NONE;
++if (getCompressOutput(context)) {
++// find the kind of compression to do
++compressionType = getOutputCompressionType(context);
++
++// find the right codec
++Class<?> codecClass = getOutputCompressorClass(context, 
++                                              DefaultCodec.class);
++codec = (CompressionCodec) 
++ ReflectionUtils.newInstance(codecClass, conf);
++}
++// get the path of the temporary output file 
++Path file = getDefaultWorkFile(context, Integer.toString(subtaskid));
++FileSystem fs = file.getFileSystem(conf);
++//conf.set("reduce.tmp.output.file."+Integer.toString(subtaskid), file.toString());
++final SequenceFile.Writer out = 
++SequenceFile.createWriter(fs, conf, file,
++                         context.getOutputKeyClass(),
++                         context.getOutputValueClass(),
++                         compressionType,
++                         codec,
++                         context);
++
++return new RecordWriter<K, V>() {
++
++ public void write(K key, V value)
++   throws IOException {
++
++   out.append(key, value);
++ }
++
++ public void close(TaskAttemptContext context) throws IOException { 
++   out.close();
++ }
++};
++}
++  
++
+ 
+   /**
+    * Get the {@link CompressionType} for the output {@link SequenceFile}.
+diff --git a/src/mapred/org/apache/hadoop/mapreduce/lib/output/TextOutputFormat.java b/src/mapred/org/apache/hadoop/mapreduce/lib/output/TextOutputFormat.java
+index 9f234df..e8b5585 100644
+--- a/src/mapred/org/apache/hadoop/mapreduce/lib/output/TextOutputFormat.java
++++ b/src/mapred/org/apache/hadoop/mapreduce/lib/output/TextOutputFormat.java
+@@ -107,6 +107,7 @@ public class TextOutputFormat<K, V> extends FileOutputFormat<K, V> {
+     }
+   }
+ 
++  
+   public RecordWriter<K, V> 
+          getRecordWriter(TaskAttemptContext job
+                          ) throws IOException, InterruptedException {
+@@ -134,5 +135,34 @@ public class TextOutputFormat<K, V> extends FileOutputFormat<K, V> {
+                                         keyValueSeparator);
+     }
+   }
++  
++  public RecordWriter<K, V> 
++         getRecordWriter(TaskAttemptContext job, int subtaskid
++                         ) throws IOException, InterruptedException {
++    Configuration conf = job.getConfiguration();
++    boolean isCompressed = getCompressOutput(job);
++    String keyValueSeparator= conf.get("mapred.textoutputformat.separator",
++                                       "\t");
++    CompressionCodec codec = null;
++    String extension = Integer.toString(subtaskid);
++    if (isCompressed) {
++      Class<? extends CompressionCodec> codecClass = 
++        getOutputCompressorClass(job, GzipCodec.class);
++      codec = (CompressionCodec) ReflectionUtils.newInstance(codecClass, conf);
++      extension = codec.getDefaultExtension();
++    }
++    Path file = getDefaultWorkFile(job, extension);
++    FileSystem fs = file.getFileSystem(conf);
++    //conf.set("reduce.tmp.output.file."+Integer.toString(subtaskid), file.toString());
++    if (!isCompressed) {
++      FSDataOutputStream fileOut = fs.create(file, false);
++      return new LineRecordWriter<K, V>(fileOut, keyValueSeparator);
++    } else {
++      FSDataOutputStream fileOut = fs.create(file, false);
++      return new LineRecordWriter<K, V>(new DataOutputStream
++                                        (codec.createOutputStream(fileOut)),
++                                        keyValueSeparator);
++    }
++  }
+ }
+ 
+diff --git a/src/test/org/apache/hadoop/mapreduce/TestMROutputFormat.java b/src/test/org/apache/hadoop/mapreduce/TestMROutputFormat.java
+index 3d7b179..7cae567 100644
+--- a/src/test/org/apache/hadoop/mapreduce/TestMROutputFormat.java
++++ b/src/test/org/apache/hadoop/mapreduce/TestMROutputFormat.java
+@@ -190,7 +190,22 @@ implements Configurable {
+       }
+     }; 
+   }
+-  
++  public RecordWriter<IntWritable, IntWritable> getRecordWriter(
++      TaskAttemptContext context, int subtaskid) throws IOException, InterruptedException {
++    assertTrue(context.getConfiguration().getBoolean(TEST_CONFIG_NAME, false));
++    return new RecordWriter<IntWritable, IntWritable>() {
++
++      @Override
++      public void close(TaskAttemptContext context) throws IOException,
++          InterruptedException {	
++      }
++
++      @Override
++      public void write(IntWritable key, IntWritable value) throws IOException,
++          InterruptedException {	
++      }
++    }; 
++  }
+   @Override
+   public Configuration getConf() {
+       return conf;

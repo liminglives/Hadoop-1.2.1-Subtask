@@ -607,10 +607,10 @@ class MapTask extends Task {
           inputRecordCounter.increment(1);
           fileInputByteCounter.increment(bytesInCurr - bytesInPrev);
         }
-        if (subtaskId == -1)
+        //if (subtaskId == -1)
         	reporter.setProgress(getProgress());
-        else
-            reporter.setProgress(getProgress(),subtaskId);
+        //else
+         //   reporter.setProgress(getProgress(),subtaskId);
       } catch (IOException ioe) {
         if (inputSplit instanceof FileSplit) {
           FileSplit fileSplit = (FileSplit) inputSplit;
@@ -705,6 +705,26 @@ class MapTask extends Task {
 
       long bytesOutPrev = getOutputBytes(fsStats);
       out = outputFormat.getRecordWriter(taskContext);
+      long bytesOutCurr = getOutputBytes(fsStats);
+      fileOutputByteCounter.increment(bytesOutCurr - bytesOutPrev);
+    }
+    NewDirectOutputCollector(org.apache.hadoop.mapreduce.JobContext jobContext,
+        JobConf job, TaskUmbilicalProtocol umbilical, TaskReporter reporter, int subtaskid) 
+    throws IOException, ClassNotFoundException, InterruptedException {
+      this.reporter = reporter;
+      Statistics matchedStats = null;
+      if (outputFormat instanceof org.apache.hadoop.mapreduce.lib.output.FileOutputFormat) {
+        matchedStats = getFsStatistics(org.apache.hadoop.mapreduce.lib.output.FileOutputFormat
+            .getOutputPath(jobContext), job);
+      }
+      fsStats = matchedStats;
+      mapOutputRecordCounter = 
+        reporter.getCounter(MAP_OUTPUT_RECORDS);
+      fileOutputByteCounter = reporter
+          .getCounter(org.apache.hadoop.mapreduce.lib.output.FileOutputFormat.Counter.BYTES_WRITTEN);
+
+      long bytesOutPrev = getOutputBytes(fsStats);
+      out = outputFormat.getRecordWriter(taskContext, subtaskid);
       long bytesOutCurr = getOutputBytes(fsStats);
       fileOutputByteCounter.increment(bytesOutCurr - bytesOutPrev);
     }
@@ -899,7 +919,7 @@ class MapTask extends Task {
 	        // get an output object
 	        if (job.getNumReduceTasks() == 0) {
 	           output =
-	             new NewDirectOutputCollector(taskContext, job, umbilical, reporter);
+	             new NewDirectOutputCollector(taskContext, job, umbilical, reporter, subtaskId);
 	        } else {
 	          output = 
 	        	 new NewOutputCollector(taskContext, job, umbilical, reporter, subtaskId);
@@ -1005,7 +1025,7 @@ class MapTask extends Task {
 	     if (numReduceTasks > 0) {
 	       collector = new MapOutputBuffer(umbilical, job, reporter, subtaskId);
 	     } else { 
-	       collector = new DirectMapOutputCollector(umbilical, job, reporter);
+	       collector = new DirectMapOutputCollector(umbilical, job, reporter, subtaskId);
 	     }
 	     MapRunnable<INKEY,INVALUE,OUTKEY,OUTVALUE> runner =
 	       ReflectionUtils.newInstance(job.getMapRunnerClass(), job);
@@ -1116,7 +1136,8 @@ class MapTask extends Task {
     } 
     LOG.info("====Liming taskId="+getTaskID()+": all subtasks finished, subtaskstatus="+
     		taskStatus.getStatusSubtasks());
-    if (!isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/) {
+    if (!isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/ &&
+    		job.getNumReduceTasks() != 0) {
       try {
         mergeSubFileout(job, reporter, subtasks.size());}
       catch (IOException ioe) {
@@ -1201,7 +1222,9 @@ class MapTask extends Task {
     } 
     LOG.info("====Liming taskId="+getTaskID()+": all subtasks finished, subtaskstatus="+
     		taskStatus.getStatusSubtasks());
-    if (!isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/) {
+    int numReduceTasks = conf.getNumReduceTasks(); 
+    if (!isSubtaskOutputOn/*MRConstants.IS_SUBTASK_OUTPUT_ON*/&& 
+    		numReduceTasks != 0) {
       try {
         mergeSubFileout(job, reporter, subtasks.size());}
       catch (IOException ioe) {
@@ -1567,7 +1590,29 @@ rfs.delete(filename[i],true);
       long bytesOutCurr = getOutputBytes(fsStats);
       fileOutputByteCounter.increment(bytesOutCurr - bytesOutPrev);
     }
+    public DirectMapOutputCollector(TaskUmbilicalProtocol umbilical,
+        JobConf job, TaskReporter reporter, int subtaskid) throws IOException {
+      this.reporter = reporter;
+      String finalName = getOutputName(subtaskid);//getPartition());
+      FileSystem fs = FileSystem.get(job);
 
+      
+      OutputFormat<K, V> outputFormat = job.getOutputFormat();
+      
+      Statistics matchedStats = null;
+      if (outputFormat instanceof FileOutputFormat) {
+        matchedStats = getFsStatistics(FileOutputFormat.getOutputPath(job), job);
+      } 
+      fsStats = matchedStats;
+      mapOutputRecordCounter = reporter.getCounter(MAP_OUTPUT_RECORDS);
+      fileOutputByteCounter = reporter
+          .getCounter(FileOutputFormat.Counter.BYTES_WRITTEN);
+      
+      long bytesOutPrev = getOutputBytes(fsStats);
+      out = job.getOutputFormat().getRecordWriter(fs, job, finalName, reporter);
+      long bytesOutCurr = getOutputBytes(fsStats);
+      fileOutputByteCounter.increment(bytesOutCurr - bytesOutPrev);
+    }
     public void close() throws IOException {
       if (this.out != null) {
         long bytesOutPrev = getOutputBytes(fsStats);

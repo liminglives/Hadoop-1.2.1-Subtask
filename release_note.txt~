@@ -1,0 +1,5 @@
+1.2.1.1
+add new feature: multithreaded subtask, and outputs of all subtasks will merge after all subtask finished.
+
+1.2.1.2
+add new feature: subblock 
